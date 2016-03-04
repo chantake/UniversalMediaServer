@@ -25,6 +25,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.text.Collator;
 import java.text.Normalizer;
 import java.util.*;
@@ -40,6 +41,7 @@ import net.pms.external.AdditionalFoldersAtRoot;
 import net.pms.external.ExternalFactory;
 import net.pms.external.ExternalListener;
 import net.pms.formats.Format;
+import net.pms.io.StreamGobbler;
 import net.pms.newgui.IFrame;
 import net.pms.util.CodeDb;
 import net.pms.util.FileUtil;
@@ -117,15 +119,16 @@ public class RootFolder extends DLNAResource {
 			addChild(last);
 		}
 
-		if (!configuration.isHideNewMediaFolder()) {
-			String m = configuration.getFoldersMonitored();
-			if (!StringUtils.isEmpty(m)) {
-				String[] tmp = m.split(",");
-				File[] dirs = new File[tmp.length];
-				for (int i = 0; i < tmp.length; i++) {
-					dirs[i] = new File(tmp[i]);
-				}
-				mon = new MediaMonitor(dirs);
+		String m = configuration.getFoldersMonitored();
+		if (!StringUtils.isEmpty(m)) {
+			String[] tmp = m.split(",");
+			File[] dirs = new File[tmp.length];
+			for (int i = 0; i < tmp.length; i++) {
+				dirs[i] = new File(tmp[i].replaceAll("&comma;", ","));
+			}
+			mon = new MediaMonitor(dirs);
+
+			if (!configuration.isHideNewMediaFolder()) {
 				addChild(mon);
 			}
 		}
@@ -199,6 +202,9 @@ public class RootFolder extends DLNAResource {
 	}
 
 	public void scan() {
+		if (!configuration.getUseCache()) {
+			throw new IllegalStateException("Can't scan when cache is disabled");
+		}
 		running = true;
 
 		if (!isDiscovered()) {
@@ -206,10 +212,15 @@ public class RootFolder extends DLNAResource {
 		}
 
 		setDefaultRenderer(RendererConfiguration.getDefaultConf());
+		LOGGER.trace("Starting scan of: {}", this.getName());
 		scan(this);
 		IFrame frame = PMS.get().getFrame();
-		frame.setScanLibraryEnabled(true);
-		PMS.get().getDatabase().cleanup();
+
+		// Running might have been set false during scan
+		if (running) {
+			frame.setScanLibraryEnabled(true);
+			PMS.get().getDatabase().cleanup();
+		}
 		frame.setStatusLine(null);
 	}
 
@@ -230,22 +241,19 @@ public class RootFolder extends DLNAResource {
 			for (DLNAResource child : resource.getChildren()) {
 				if (running && child.allowScan()) {
 					child.setDefaultRenderer(resource.getDefaultRenderer());
-					String trace = null;
 
+					// Display and log which folder is being scanned
+					String childName = child.getName();
 					if (child instanceof RealFile) {
-						trace = Messages.getString("DLNAMediaDatabase.4") + " " + child.getName();
-					}
-
-					if (trace != null) {
-						LOGGER.debug(trace);
-						PMS.get().getFrame().setStatusLine(trace);
+						LOGGER.debug("Scanning folder: " + childName);
+						PMS.get().getFrame().setStatusLine(Messages.getString("DLNAMediaDatabase.4") + " " + childName);
 					}
 
 					if (child.isDiscovered()) {
 						child.refreshChildren();
 					} else {
 						if (child instanceof DVDISOFile || child instanceof DVDISOTitle) { // ugly hack
-							child.resolve();
+							child.syncResolve();
 						}
 						child.discoverChildren();
 						child.analyzeChildren(-1);
@@ -330,99 +338,99 @@ public class RootFolder extends DLNAResource {
 		File webConf = new File(webConfPath);
 		if (webConf.exists() && configuration.getExternalNetwork() && !configuration.isHideWebFolder(tags)) {
 			addWebFolder(webConf);
-			PMS.getFileWatcher().add(new FileWatcher.Watch(webConf.getPath(), rootWatcher, this, RELOAD_WEB_CONF));
+			FileWatcher.add(new FileWatcher.Watch(webConf.getPath(), rootWatcher, this, RELOAD_WEB_CONF));
 		}
 		setLastModified(1);
 	}
 
 	private void addWebFolder(File webConf) {
-		if (webConf.exists()) {
-			try {
-				try (LineNumberReader br = new LineNumberReader(new InputStreamReader(new FileInputStream(webConf), "UTF-8"))) {
-					String line;
-					while ((line = br.readLine()) != null) {
-						line = line.trim();
+		try {
+			try (LineNumberReader br = new LineNumberReader(new InputStreamReader(new FileInputStream(webConf), StandardCharsets.UTF_8))) {
+				String line;
+				while ((line = br.readLine()) != null) {
+					line = line.trim();
 
-						if (line.length() > 0 && !line.startsWith("#") && line.indexOf('=') > -1) {
-							String key = line.substring(0, line.indexOf('='));
-							String value = line.substring(line.indexOf('=') + 1);
-							String[] keys = parseFeedKey(key);
+					if (line.length() > 0 && !line.startsWith("#") && line.indexOf('=') > -1) {
+						String key = line.substring(0, line.indexOf('='));
+						String value = line.substring(line.indexOf('=') + 1);
+						String[] keys = parseFeedKey(key);
 
-							try {
-								if (
-									keys[0].equals("imagefeed") ||
-									keys[0].equals("audiofeed") ||
-									keys[0].equals("videofeed") ||
-									keys[0].equals("audiostream") ||
-									keys[0].equals("videostream")
-								) {
-									String[] values = parseFeedValue(value);
-									DLNAResource parent = null;
+						try {
+							if (
+								keys[0].equals("imagefeed") ||
+								keys[0].equals("audiofeed") ||
+								keys[0].equals("videofeed") ||
+								keys[0].equals("audiostream") ||
+								keys[0].equals("videostream")
+							) {
+								String[] values = parseFeedValue(value);
+								DLNAResource parent = null;
 
-									if (keys[1] != null) {
-										StringTokenizer st = new StringTokenizer(keys[1], ",");
-										DLNAResource currentRoot = this;
+								if (keys[1] != null) {
+									StringTokenizer st = new StringTokenizer(keys[1], ",");
+									DLNAResource currentRoot = this;
 
-										while (st.hasMoreTokens()) {
-											String folder = st.nextToken();
-											parent = currentRoot.searchByName(folder);
+									while (st.hasMoreTokens()) {
+										String folder = st.nextToken();
+										parent = currentRoot.searchByName(folder);
 
-											if (parent == null) {
-												parent = new VirtualFolder(folder, "");
-												if (currentRoot == this) {
-													// parent is a top-level web folder
-													webFolders.add(parent);
-												}
-												currentRoot.addChild(parent);
+										if (parent == null) {
+											parent = new VirtualFolder(folder, "");
+											if (currentRoot == this) {
+												// parent is a top-level web folder
+												webFolders.add(parent);
 											}
-
-											currentRoot = parent;
+											currentRoot.addChild(parent);
 										}
-									}
 
-									if (parent == null) {
-										parent = this;
-									}
-									if (keys[0].endsWith("stream")) {
-										int type = keys[0].startsWith("audio") ? Format.AUDIO : Format.VIDEO;
-										DLNAResource playlist = PlaylistFolder.getPlaylist(values[0], values[1], type);
-										if (playlist != null) {
-											parent.addChild(playlist);
-											continue;
-										}
-									}
-									switch (keys[0]) {
-										case "imagefeed":
-											parent.addChild(new ImagesFeed(values[0]));
-											break;
-										case "videofeed":
-											parent.addChild(new VideosFeed(values[0]));
-											break;
-										case "audiofeed":
-											parent.addChild(new AudiosFeed(values[0]));
-											break;
-										case "audiostream":
-											parent.addChild(new WebAudioStream(values[0], values[1], values[2]));
-											break;
-										case "videostream":
-											parent.addChild(new WebVideoStream(values[0], values[1], values[2]));
-											break;
-										default:
-											break;
+										currentRoot = parent;
 									}
 								}
-							} catch (ArrayIndexOutOfBoundsException e) {
-								// catch exception here and go with parsing
-								LOGGER.info("Error at line " + br.getLineNumber() + " of WEB.conf: " + e.getMessage());
-								LOGGER.debug(null, e);
+
+								if (parent == null) {
+									parent = this;
+								}
+								if (keys[0].endsWith("stream")) {
+									int type = keys[0].startsWith("audio") ? Format.AUDIO : Format.VIDEO;
+									DLNAResource playlist = PlaylistFolder.getPlaylist(values[0], values[1], type);
+									if (playlist != null) {
+										parent.addChild(playlist);
+										continue;
+									}
+								}
+								switch (keys[0]) {
+									case "imagefeed":
+										parent.addChild(new ImagesFeed(values[0]));
+										break;
+									case "videofeed":
+										parent.addChild(new VideosFeed(values[0]));
+										break;
+									case "audiofeed":
+										parent.addChild(new AudiosFeed(values[0]));
+										break;
+									case "audiostream":
+										parent.addChild(new WebAudioStream(values[0], values[1], values[2]));
+										break;
+									case "videostream":
+										parent.addChild(new WebVideoStream(values[0], values[1], values[2]));
+										break;
+									default:
+										break;
+								}
 							}
+						} catch (ArrayIndexOutOfBoundsException e) {
+							// catch exception here and go with parsing
+							LOGGER.info("Error at line " + br.getLineNumber() + " of WEB.conf: " + e.getMessage());
+							LOGGER.debug(null, e);
 						}
 					}
 				}
-			} catch (IOException e) {
-				LOGGER.info("Unexpected error in WEB.conf" + e.getMessage());
-				LOGGER.debug(null, e);
 			}
+		} catch (FileNotFoundException e) {
+			LOGGER.debug("Can't read web configuration file {}", e.getMessage());
+		} catch (IOException e) {
+			LOGGER.warn("Unexpected error in WEB.conf: " + e.getMessage());
+			LOGGER.debug("", e);
 		}
 	}
 
@@ -593,7 +601,6 @@ public class RootFolder extends DLNAResource {
 						// If the result code is not read by parent. The process might turn into a zombie (they are real!)
 						process.waitFor();
 					} catch (InterruptedException e) {
-						// Can this thread be interrupted? Don't think so, or, and even when, what will happen?
 						LOGGER.warn("Interrupted while waiting for stream for process" + e.getMessage());
 					}
 
@@ -751,6 +758,7 @@ public class RootFolder extends DLNAResource {
 		} else if (Platform.isWindows()) {
 			Process process = Runtime.getRuntime().exec("reg query \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders\" /v \"My Music\"");
 			String location;
+			//TODO The encoding of the output from reg query is unclear, this must be investigated further
 			try (BufferedReader in = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
 				location = null;
 				while ((line = in.readLine()) != null) {
@@ -1096,37 +1104,34 @@ public class RootFolder extends DLNAResource {
 					@Override
 					public void discoverChildren() {
 						File[] files = scriptDir.listFiles();
-						for (File file : files) {
-							String name = file.getName().replaceAll("_", " ");
-							int pos = name.lastIndexOf('.');
+						if (files != null) {
+							for (File file : files) {
+								String name = file.getName().replaceAll("_", " ");
+								int pos = name.lastIndexOf('.');
 
-							if (pos != -1) {
-								name = name.substring(0, pos);
-							}
-
-							final File f = file;
-
-							addChild(new VirtualVideoAction(name, true) {
-								@Override
-								public boolean enable() {
-									try {
-										ProcessBuilder pb = new ProcessBuilder(f.getAbsolutePath());
-										Process pid = pb.start();
-										InputStream is = pid.getInputStream();
-										BufferedReader br;
-										try (InputStreamReader isr = new InputStreamReader(is)) {
-											br = new BufferedReader(isr);
-											while (br.readLine() != null) {
-											}
-										}
-										br.close();
-										pid.waitFor();
-									} catch (IOException | InterruptedException e) {
-									}
-
-									return true;
+								if (pos != -1) {
+									name = name.substring(0, pos);
 								}
-							});
+
+								final File f = file;
+
+								addChild(new VirtualVideoAction(name, true) {
+									@Override
+									public boolean enable() {
+										try {
+											ProcessBuilder pb = new ProcessBuilder(f.getAbsolutePath());
+											pb.redirectErrorStream(true);
+											Process pid = pb.start();
+											// consume the error and output process streams
+											StreamGobbler.consume(pid.getInputStream());
+											pid.waitFor();
+										} catch (IOException | InterruptedException e) {
+										}
+
+										return true;
+									}
+								});
+							}
 						}
 					}
 				});

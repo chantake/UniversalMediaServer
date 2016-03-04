@@ -17,6 +17,7 @@ import net.pms.PMS;
 import net.pms.dlna.*;
 import net.pms.encoders.Player;
 import net.pms.formats.Format;
+import net.pms.formats.v2.AudioProperties;
 import net.pms.io.OutputParams;
 import net.pms.network.HTTPResource;
 import net.pms.network.SpeedStats;
@@ -89,7 +90,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	protected Map<String, DLNAResource> renderCache;
 
 	// TextWrap parameters
-	protected int line_w, line_h, indent;
+	protected int lineWidth, lineHeight, indent;
 	protected String inset, dots;
 
 	// property values
@@ -158,9 +159,12 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	protected static final String MUX_LPCM_TO_MPEG = "MuxLPCMToMpeg";
 	protected static final String MUX_NON_MOD4_RESOLUTION = "MuxNonMod4Resolution";
 	protected static final String NOT_AGGRESSIVE_BROWSING = "NotAggressiveBrowsing";
+	protected static final String OFFER_SUBTITLES_BY_PROTOCOL_INFO = "OfferSubtitlesByProtocolInfo";
+	protected static final String OFFER_SUBTITLES_AS_SOURCE = "OfferSubtitlesAsSource";
 	protected static final String OUTPUT_3D_FORMAT = "Output3DFormat";
 	protected static final String OVERRIDE_FFMPEG_VF = "OverrideFFmpegVideoFilter";
 	protected static final String PREPEND_TRACK_NUMBERS = "PrependTrackNumbers";
+	protected static final String PUSH_METADATA = "PushMetadata";
 	protected static final String RENDERER_ICON = "RendererIcon";
 	protected static final String RENDERER_NAME = "RendererName";
 	protected static final String RESCALE_BY_RENDERER = "RescaleByRenderer";
@@ -170,6 +174,8 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	protected static final String SHOW_AUDIO_METADATA = "ShowAudioMetadata";
 	protected static final String SHOW_DVD_TITLE_DURATION = "ShowDVDTitleDuration"; // Ditlew
 	protected static final String SHOW_SUB_METADATA = "ShowSubMetadata";
+	protected static final String SQUARE_AUDIO_THUMBNAILS = "SquareAudioThumbnails";
+	protected static final String SQUARE_IMAGE_THUMBNAILS = "SquareImageThumbnails";
 	protected static final String STREAM_EXT = "StreamExtensions";
 	protected static final String SUBTITLE_HTTP_HEADER = "SubtitleHttpHeader";
 	protected static final String SUPPORTED = "Supported";
@@ -180,6 +186,8 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	protected static final String THUMBNAIL_AS_RESOURCE = "ThumbnailAsResource";
 	protected static final String THUMBNAIL_HEIGHT = "ThumbnailHeight";
 	protected static final String THUMBNAIL_WIDTH = "ThumbnailWidth";
+	protected static final String THUMBNAIL_PADDING = "ThumbnailPadding";
+	protected static final String THUMBNAILS = "Thumbnails";
 	protected static final String TRANSCODE_AUDIO = "TranscodeAudio";
 	protected static final String TRANSCODE_AUDIO_441KHZ = "TranscodeAudioTo441kHz";
 	protected static final String TRANSCODE_EXT = "TranscodeExtensions";
@@ -209,6 +217,10 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 
 	public static RendererConfiguration getDefaultConf() {
 		return defaultConf;
+	}
+
+	public ConfigurationReader getConfigurationReader() {
+		return configurationReader;
 	}
 
 	/**
@@ -243,11 +255,11 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 						r.rank = rank++;
 						String rendererName = r.getConfName();
 						allRenderersNames.add(rendererName);
-						String renderersGroup = null; 
+						String renderersGroup = null;
 						if (rendererName.indexOf(" ") > 0) {
 							renderersGroup = rendererName.substring(0, rendererName.indexOf(" "));
 						}
-						
+
 						if (selectedRenderers.contains(rendererName) || selectedRenderers.contains(renderersGroup) || selectedRenderers.contains(pmsConf.ALL_RENDERERS)) {
 							enabledRendererConfs.add(r);
 						} else {
@@ -303,9 +315,28 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	public List<String> getStringList(String key, String def) {
-		return configurationReader.getStringList(key, def);
+		List<String> result = configurationReader.getStringList(key, def);
+		if (result.size() == 1 && result.get(0).equalsIgnoreCase("None")) {
+			return new ArrayList<>();
+		} else {
+			return result;
+		}
 	}
-   	
+
+	public void setStringList(String key, List<String> value) {
+		String result = "";
+		for (String element : value) {
+			if (!result.isEmpty()) {
+				result += ", ";
+			}
+			result += element;
+		}
+		if (result.isEmpty()) {
+			result = "None";
+		}
+		configuration.setProperty(key, result);
+	}
+
 	public Color getColor(String key, String defaultValue) {
 		String colorString = getString(key, defaultValue);
 		Color color = StringUtil.parseColor(colorString);
@@ -336,7 +367,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	 * @return The list of connected renderers.
 	 */
 	public static Collection<RendererConfiguration> getConnectedRenderersConfigurations() {
-		// We need to check both upnp and http sides to ensure a complete list
+		// We need to check both UPnP and http sides to ensure a complete list
 		HashSet<RendererConfiguration> renderers = new HashSet<>(UPNPHelper.getRenderers(UPNPHelper.ANY));
 		renderers.addAll(addressAssociation.values());
 		// Ensure any remaining secondary common-ip renderers (which are no longer in address association) are added
@@ -430,7 +461,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 		for (RendererConfiguration r : getConnectedRenderersConfigurations()) {
 			r.rootFolder = null;
 		}
-		// Resetting enabledRendererConfs isn't strictly speaking necessary any more, since 
+		// Resetting enabledRendererConfs isn't strictly speaking necessary any more, since
 		// these are now for reference only and never actually populate their root folders.
 		for (RendererConfiguration r : enabledRendererConfs) {
 			r.rootFolder = null;
@@ -639,7 +670,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 		} catch (Exception e) {
 		}
 		if (! recognized) {
-			// Mark it as unloaded so actual recognition can happen later if upnp sees it.
+			// Mark it as unloaded so actual recognition can happen later if UPnP sees it.
 			LOGGER.debug("Marking renderer \"{}\" at {} as unrecognized", r, ia);
 			r.loaded = false;
 		}
@@ -992,14 +1023,14 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 		}
 
 		String s = getString(TEXTWRAP, "").toLowerCase();
-		line_w = getIntAt(s, "width:", 0);
-		if (line_w > 0) {
-			line_h = getIntAt(s, "height:", 0);
+		lineWidth = getIntAt(s, "width:", 0);
+		if (lineWidth > 0) {
+			lineHeight = getIntAt(s, "height:", 0);
 			indent = getIntAt(s, "indent:", 0);
-			int ws = getIntAt(s, "whitespace:", 9);
-			int dotct = getIntAt(s, "dots:", 0);
-			inset = new String(new byte[indent]).replaceAll(".", Character.toString((char) ws));
-			dots = new String(new byte[dotct]).replaceAll(".", ".");
+			int whitespace = getIntAt(s, "whitespace:", 9);
+			int dotCount = getIntAt(s, "dots:", 0);
+			inset = StringUtil.fillString(whitespace, indent);
+			dots = StringUtil.fillString(".", dotCount);
 		}
 
 		charMap = new HashMap<>();
@@ -1047,7 +1078,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 			configuration.addProperty(SUPPORTED, "f:.+");
 		}
 
-		if (isMediaParserV2()) {
+		if (isUseMediaInfo()) {
 			formatConfiguration = new FormatConfiguration(configuration.getList(SUPPORTED));
 		}
 	}
@@ -1228,14 +1259,14 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	 *            configured for this renderer.
 	 * @return The mime type.
 	 */
-	public String getMimeType(String mimeType) {
+	public String getMimeType(String mimeType, DLNAMediaInfo media) {
 		if (mimeType == null) {
 			return null;
 		}
 
 		String matchedMimeType = null;
 
-		if (isMediaParserV2()) {
+		if (isUseMediaInfo()) {
 			// Use the supported information in the configuration to determine the transcoding mime type.
 			if (HTTPResource.VIDEO_TRANSCODE.equals(mimeType)) {
 				if (isTranscodeToMPEGTSH264AC3()) {
@@ -1264,10 +1295,20 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 					matchedMimeType = getFormatConfiguration().match(FormatConfiguration.LPCM, null, null);
 
 					if (matchedMimeType != null) {
-						if (isTranscodeAudioTo441()) {
-							matchedMimeType += ";rate=44100;channels=2";
-						} else {
-							matchedMimeType += ";rate=48000;channels=2";
+						if (pmsConfiguration.isAudioResample()) {
+							if (isTranscodeAudioTo441()) {
+								matchedMimeType += ";rate=44100;channels=2";
+							} else {
+								matchedMimeType += ";rate=48000;channels=2";
+							}
+						} else if (media != null) {
+							AudioProperties audio = media.getFirstAudioTrack().getAudioProperties();
+							if (audio.getSampleFrequency() > 0) {
+								matchedMimeType += ";rate=" + Integer.toString(audio.getSampleFrequency());
+							}
+							if (audio.getNumberOfChannels() > 0) {
+								matchedMimeType += ";channels=" + Integer.toString(audio.getNumberOfChannels());
+							}
 						}
 					}
 				}
@@ -1292,10 +1333,20 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 					// Default audio transcoding mime type
 					matchedMimeType = HTTPResource.AUDIO_LPCM_TYPEMIME;
 
-					if (isTranscodeAudioTo441()) {
-						matchedMimeType += ";rate=44100;channels=2";
-					} else {
-						matchedMimeType += ";rate=48000;channels=2";
+					if (pmsConfiguration.isAudioResample()) {
+						if (isTranscodeAudioTo441()) {
+							matchedMimeType += ";rate=44100;channels=2";
+						} else {
+							matchedMimeType += ";rate=48000;channels=2";
+						}
+					} else if (media != null) {
+						AudioProperties audio = media.getFirstAudioTrack().getAudioProperties();
+						if (audio.getSampleFrequency() > 0) {
+							matchedMimeType += ";rate=" + Integer.toString(audio.getSampleFrequency());
+						}
+						if (audio.getNumberOfChannels() > 0) {
+							matchedMimeType += ";channels=" + Integer.toString(audio.getNumberOfChannels());
+						}
 					}
 				}
 			}
@@ -1337,7 +1388,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	/**
-	 * Returns the unique upnp details of this renderer as defined in the
+	 * Returns the unique UPnP details of this renderer as defined in the
 	 * renderer configuration. Default value is "".
 	 *
 	 * @return The detail string.
@@ -1347,7 +1398,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	/**
-	 * Returns the upnp details of this renderer as broadcast by itself, if known.
+	 * Returns the UPnP details of this renderer as broadcast by itself, if known.
 	 * Default value is null.
 	 *
 	 * @return The detail map.
@@ -1377,7 +1428,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 						if (getAddress() != null) {
 							put(Messages.getString("RendererPanel.11"), getAddress().getHostAddress().toString());
 						}
-					}	
+					}
 				};
 			}
 		}
@@ -1385,7 +1436,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	/**
-	 * Returns the current upnp state variables of this renderer, if known. Default value is null.
+	 * Returns the current UPnP state variables of this renderer, if known. Default value is null.
 	 *
 	 * @return The data.
 	 */
@@ -1394,7 +1445,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	/**
-	 * Returns the upnp services of this renderer.
+	 * Returns the UPnP services of this renderer.
 	 * Default value is null.
 	 *
 	 * @return The list of service names.
@@ -1422,7 +1473,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	/**
-	 * Returns the upnp instance id of this renderer, if known. Default value is null.
+	 * Returns the UPnP instance id of this renderer, if known. Default value is null.
 	 *
 	 * @return The instance id.
 	 */
@@ -1431,7 +1482,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	/**
-	 * Sets the upnp instance id of this renderer.
+	 * Sets the UPnP instance id of this renderer.
 	 *
 	 * @param id The instance id.
 	 */
@@ -1449,7 +1500,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	/**
-	 * Returns whether this renderer is currently connected via upnp.
+	 * Returns whether this renderer is currently connected via UPnP.
 	 *
 	 * @return Whether connected.
 	 */
@@ -1472,7 +1523,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	 * @return The address.
 	 */
 	public InetAddress getAddress() {
-		// If we have a uuid look up the upnp device address, which is always
+		// If we have a uuid look up the UPnP device address, which is always
 		// correct even if another device has overwritten our association
 		if (uuid != null) {
 			InetAddress address = UPNPHelper.getAddress(uuid);
@@ -1490,7 +1541,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	/**
-	 * Returns whether this renderer provides upnp control services.
+	 * Returns whether this renderer provides UPnP control services.
 	 *
 	 * @return Whether controllable.
 	 */
@@ -1499,7 +1550,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	/**
-	 * Returns a upnp player for this renderer if upnp control is supported.
+	 * Returns a UPnP player for this renderer if UPnP control is supported.
 	 *
 	 * @return a player or null.
 	 */
@@ -1512,9 +1563,9 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	/**
-	 * Sets the upnp player.
+	 * Sets the UPnP player.
 	 *
-	 * @param the player.
+	 * @param player
 	 */
 	public void setPlayer(UPNPHelper.Player player) {
 		this.player = player;
@@ -1659,7 +1710,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 
 	public boolean isMuxH264MpegTS() {
 		boolean muxCompatible = getBoolean(MUX_H264_WITH_MPEGTS, true);
-		if (isMediaParserV2()) {
+		if (isUseMediaInfo()) {
 			muxCompatible = getFormatConfiguration().match(FormatConfiguration.MPEGTS, FormatConfiguration.H264, null) != null;
 		}
 
@@ -1675,7 +1726,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	public boolean isMuxDTSToMpeg() {
-		if (isMediaParserV2()) {
+		if (isUseMediaInfo()) {
 			return getFormatConfiguration().isDTSSupported();
 		}
 
@@ -1695,7 +1746,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	public boolean isMuxLPCMToMpeg() {
-		if (isMediaParserV2()) {
+		if (isUseMediaInfo()) {
 			return getFormatConfiguration().isLPCMSupported();
 		}
 
@@ -1707,11 +1758,22 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	public boolean isMpeg2Supported() {
-		if (isMediaParserV2()) {
+		if (isUseMediaInfo()) {
 			return getFormatConfiguration().isMpeg2Supported();
 		}
 
 		return isPS3();
+	}
+
+	/**
+	 * Returns whether or not to include metadata when pushing uris.
+	 * This is meant as a stopgap workaround for any renderer that
+	 * chokes on our metadata.
+	 *
+	 * @return whether to include metadata.
+	 */
+	public boolean isPushMetadata() {
+		return getBoolean(PUSH_METADATA, true);
 	}
 
 	/**
@@ -1991,7 +2053,10 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	/**
 	 * Some devices (e.g. Samsung) recognize a custom HTTP header for retrieving
 	 * the contents of a subtitles file. This method will return the name of that
-	 * custom HTTP header, or "" if no such header exists. Default value is "".
+	 * custom HTTP header, or "" if no such header exists. The supported external
+	 * subtitles must be set by {@link #SupportedExternalSubtitlesFormats()}. 
+	 * 
+	 * Default value is "".
 	 *
 	 * @return The name of the custom HTTP header.
 	 */
@@ -2004,11 +2069,24 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 		return getRendererName();
 	}
 
+	@Deprecated
 	public boolean isMediaParserV2() {
+		return isUseMediaInfo();
+	}
+
+	/**
+	 * @return whether to use MediaInfo
+	 */
+	public boolean isUseMediaInfo() {
 		return getBoolean(MEDIAPARSERV2, false) && LibMediaInfoParser.isValid();
 	}
 
+	@Deprecated
 	public boolean isMediaParserV2ThumbnailGeneration() {
+		return isMediaInfoThumbnailGeneration();
+	}
+
+	public boolean isMediaInfoThumbnailGeneration() {
 		return getBoolean(MEDIAPARSERV2_THUMB, false) && LibMediaInfoParser.isValid();
 	}
 
@@ -2078,7 +2156,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	public boolean isCompatible(DLNAMediaInfo mediainfo, Format format) {
 		// Use the configured "Supported" lines in the renderer.conf
 		// to see if any of them match the MediaInfo library
-		if (isMediaParserV2() && mediainfo != null && getFormatConfiguration().match(mediainfo) != null) {
+		if (isUseMediaInfo() && mediainfo != null && getFormatConfiguration().match(mediainfo) != null) {
 			return true;
 		}
 
@@ -2180,21 +2258,21 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	public String getDcTitle(String name, String suffix, DLNAResource dlna) {
 		// Wrap + tuncate
 		int len = 0;
-		if (line_w > 0 && (name.length() + suffix.length()) > line_w) {
+		if (lineWidth > 0 && (name.length() + suffix.length()) > lineWidth) {
 			int suffix_len = dots.length() + suffix.length();
-			if (line_h == 1) {
-				len = line_w - suffix_len;
+			if (lineHeight == 1) {
+				len = lineWidth - suffix_len;
 			} else {
 				// Wrap
 				int i = dlna.isFolder() ? 0 : indent;
 				String newline = "\n" + (dlna.isFolder() ? "" : inset);
 				name = name.substring(0, i + (Character.isWhitespace(name.charAt(i)) ? 1 : 0))
-					+ WordUtils.wrap(name.substring(i) + suffix, line_w - i, newline, true);
-				len = line_w * line_h;
+					+ WordUtils.wrap(name.substring(i) + suffix, lineWidth - i, newline, true);
+				len = lineWidth * lineHeight;
 				if (len != 0 && name.length() > len) {
-					len = name.substring(0, name.length() - line_w).lastIndexOf(newline) + newline.length();
-					name = name.substring(0, len) + name.substring(len, len + line_w).replace(newline, " ");
-					len += (line_w - suffix_len - i);
+					len = name.substring(0, name.length() - lineWidth).lastIndexOf(newline) + newline.length();
+					name = name.substring(0, len) + name.substring(len, len + lineWidth).replace(newline, " ");
+					len += (lineWidth - suffix_len - i);
 				} else {
 					len = -1; // done
 				}
@@ -2234,16 +2312,35 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 		}
 	}
 
+	/**
+	 * List of the renderer supported external subtitles formats
+	 * for streaming together with streaming (not transcoded) video.
+	 * 
+	 * @return A comma-separated list of supported text-based external subtitles formats.
+	 */
 	public String getSupportedExternalSubtitles() {
 		return getString(SUPPORTED_EXTERNAL_SUBTITLES_FORMATS, "");
 	}
 
+	/**
+	 * List of the renderer supported embedded subtitles formats.
+	 * 
+	 * @return A comma-separated list of supported embedded subtitles formats.
+	 */
 	public String getSupportedEmbeddedSubtitles() {
 		return getString(SUPPORTED_INTERNAL_SUBTITLES_FORMATS, "");
 	}
 
 	public boolean useClosedCaption() {
 		return getBoolean(USE_CLOSED_CAPTION, false);
+	}
+
+	public boolean offerSubtitlesAsResource() {
+		return getBoolean(OFFER_SUBTITLES_AS_SOURCE, true);
+	}
+
+	public boolean offerSubtitlesByProtocolInfo() {
+		return getBoolean(OFFER_SUBTITLES_BY_PROTOCOL_INFO, true);
 	}
 
 	public boolean isSubtitlesStreamingSupported() {
@@ -2511,6 +2608,7 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	}
 
 	public static class PlaybackTimer extends BasicPlayer.Minimal {
+		private long duration = 0;
 
 		public PlaybackTimer(DeviceConfiguration renderer) {
 			super(renderer);
@@ -2521,16 +2619,31 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 		public void start() {
 			final DLNAResource res = renderer.getPlayingRes();
 			state.name = res.getDisplayName();
+			duration = 0;
 			if (res.getMedia() != null) {
-				state.duration = StringUtil.shortTime(res.getMedia().getDurationString(), 4);
+				duration = (long) res.getMedia().getDurationInSeconds() * 1000;
+				state.duration = DurationFormatUtils.formatDuration(duration, "HH:mm:ss");
 			}
 			Runnable r = new Runnable() {
 				@Override
 				public void run() {
 					state.playback = PLAYING;
-					while(res == renderer.getPlayingRes()) {
-						long elapsed = System.currentTimeMillis() - res.getStartTime();
-						state.position = DurationFormatUtils.formatDuration(elapsed, "HH:mm:ss");
+					while (res == renderer.getPlayingRes()) {
+						long elapsed;
+						if ((long) res.getLastStartPosition() == 0) {
+							elapsed = System.currentTimeMillis() - (long) res.getStartTime();
+						} else {
+							elapsed = System.currentTimeMillis() - (long) res.getLastStartSystemTime();
+							elapsed += (long) (res.getLastStartPosition() * 1000);
+						}
+
+						if (duration == 0 || elapsed < duration + 500) {
+							// Position is valid as far as we can tell
+							state.position = DurationFormatUtils.formatDuration(elapsed, "HH:mm:ss");
+						} else {
+							// Position is invalid, blink instead
+							state.position = ("NOT_IMPLEMENTED" + (elapsed / 1000 % 2 == 0 ? "  " : "--"));
+						}
 						alert();
 						try {
 							Thread.sleep(1000);
@@ -2647,11 +2760,48 @@ public class RendererConfiguration extends UPNPHelper.Renderer {
 	public static void verify(RendererConfiguration r) {
 		// FIXME: this is a very fallible, incomplete validity test for use only until
 		// we find something better. The assumption is that renderers unable determine
-		// their own address (i.e. non-upnp/web renderers that have lost their spot in the
+		// their own address (i.e. non-UPnP/web renderers that have lost their spot in the
 		// address association to a newer renderer at the same ip) are "invalid".
 		if (r.getUpnpMode() != BLOCK && r.getAddress() == null) {
 			LOGGER.debug("Purging renderer {} as invalid", r);
 			r.delete(0);
 		}
+	}
+
+	/**
+	 * Whether the renderer can display thumbnails.
+	 *
+	 * @return whether the renderer can display thumbnails
+	 */
+	public boolean isThumbnails() {
+		return getBoolean(THUMBNAILS, true);
+	}
+
+	/**
+	 * Whether we should add black padding to thumbnails so they are always
+	 * at the same resolution, or just scale to within the limits.
+	 *
+	 * @return whether to add padding to thumbnails
+	 */
+	public boolean isThumbnailPadding() {
+		return getBoolean(THUMBNAIL_PADDING, false);
+	}
+
+	/**
+	 * Whether to use ThumbnailHeight as ThumbnailWidth for audio thumbnails.
+	 *
+	 * @return whether to use ThumbnailHeight as ThumbnailWidth for audio thumbnails
+	 */
+	public boolean isSquareAudioThumbnails() {
+		return getBoolean(SQUARE_AUDIO_THUMBNAILS, false);
+	}
+
+	/**
+	 * Whether to use ThumbnailHeight as ThumbnailWidth for image thumbnails.
+	 *
+	 * @return whether to use ThumbnailHeight as ThumbnailWidth for image thumbnails
+	 */
+	public boolean isSquareImageThumbnails() {
+		return getBoolean(SQUARE_IMAGE_THUMBNAILS, false);
 	}
 }

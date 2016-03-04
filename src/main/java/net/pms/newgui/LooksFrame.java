@@ -20,13 +20,13 @@ package net.pms.newgui;
 
 import com.jgoodies.looks.Options;
 import com.jgoodies.looks.plastic.PlasticLookAndFeel;
+import com.jgoodies.looks.windows.WindowsLookAndFeel;
 import com.sun.jna.Platform;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.io.IOException;
 import java.net.URL;
-import java.util.Locale;
 import java.util.Observable;
 import java.util.Observer;
 import javax.imageio.ImageIO;
@@ -57,9 +57,12 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 	private final PmsConfiguration configuration;
 	public static final String START_SERVICE = "start.service";
 	private static final long serialVersionUID = 8723727186288427690L;
-	protected static final Dimension PREFERRED_SIZE = new Dimension(1000, 750);
+	private Dimension storedWindowSize = new Dimension();
+	private Dimension storedScreenSize = new Dimension();
+	protected static final Dimension STANDARD_SIZE = new Dimension(1000, 750);
 	// https://code.google.com/p/ps3mediaserver/issues/detail?id=949
 	protected static final Dimension MINIMUM_SIZE = new Dimension(800, 480);
+	private Dimension screenSize = getToolkit().getScreenSize();
 
 	/**
 	 * List of context sensitive help pages URLs. These URLs should be
@@ -87,7 +90,20 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 	private PluginTab pt;
 	private AbstractButton reload;
 	private JLabel status;
+	private static Object lookAndFeelInitializedLock = new Object();
 	private static boolean lookAndFeelInitialized = false;
+	private ViewLevel viewLevel = ViewLevel.UNKNOWN;
+
+	public ViewLevel getViewLevel() {
+		return viewLevel;
+	}
+
+	public void setViewLevel(ViewLevel viewLevel) {
+		if (viewLevel != ViewLevel.UNKNOWN){
+			this.viewLevel = viewLevel;
+			tt.applyViewLevel();
+		}
+	}
 
 	public TracesTab getTt() {
 		return tt;
@@ -113,66 +129,65 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 		return reload;
 	}
 
-	static void initializeLookAndFeel() {
-		if (lookAndFeelInitialized) {
-			return;
-		}
+	public static void initializeLookAndFeel() {
 
-		LookAndFeel selectedLaf = null;
-		if (Platform.isWindows()) {
-			try {
-				selectedLaf = (LookAndFeel) Class.forName("com.jgoodies.looks.windows.WindowsLookAndFeel").newInstance();
-			} catch (ClassNotFoundException | InstantiationException | IllegalAccessException e) {
-				selectedLaf = new PlasticLookAndFeel();
+		synchronized (lookAndFeelInitializedLock) {
+			if (lookAndFeelInitialized) {
+				return;
 			}
-		} else if (System.getProperty("nativelook") == null && !Platform.isMac()) {
-			selectedLaf = new PlasticLookAndFeel();
-		} else {
-			try {
-				String systemClassName = UIManager.getSystemLookAndFeelClassName();
-				// Workaround for Gnome
+
+			LookAndFeel selectedLaf = null;
+			if (Platform.isWindows()) {
+				selectedLaf = new WindowsLookAndFeel();
+			} else if (System.getProperty("nativelook") == null && !Platform.isMac()) {
+				selectedLaf = new PlasticLookAndFeel();
+			} else {
 				try {
-					String gtkLAF = "com.sun.java.swing.plaf.gtk.GTKLookAndFeel";
-					Class.forName(gtkLAF);
+					String systemClassName = UIManager.getSystemLookAndFeelClassName();
+					// Workaround for Gnome
+					try {
+						String gtkLAF = "com.sun.java.swing.plaf.gtk.GTKLookAndFeel";
+						Class.forName(gtkLAF);
 
-					if (systemClassName.equals("javax.swing.plaf.metal.MetalLookAndFeel")) {
-						systemClassName = gtkLAF;
+						if (systemClassName.equals("javax.swing.plaf.metal.MetalLookAndFeel")) {
+							systemClassName = gtkLAF;
+						}
+					} catch (ClassNotFoundException ce) {
+						LOGGER.error("Error loading GTK look and feel: ", ce);
 					}
-				} catch (ClassNotFoundException ce) {
-					LOGGER.error("Error loading GTK look and feel: ", ce);
+
+					LOGGER.trace("Choosing Java look and feel: " + systemClassName);
+					UIManager.setLookAndFeel(systemClassName);
+				} catch (ClassNotFoundException | InstantiationException | IllegalAccessException | UnsupportedLookAndFeelException e1) {
+					selectedLaf = new PlasticLookAndFeel();
+					LOGGER.error("Error while setting native look and feel: ", e1);
 				}
-
-				LOGGER.trace("Choosing Java look and feel: " + systemClassName);
-				UIManager.setLookAndFeel(systemClassName);
-			} catch (ClassNotFoundException | InstantiationException | IllegalAccessException | UnsupportedLookAndFeelException e1) {
-				selectedLaf = new PlasticLookAndFeel();
-				LOGGER.error("Error while setting native look and feel: ", e1);
 			}
-		}
 
-		if (selectedLaf instanceof PlasticLookAndFeel) {
-			PlasticLookAndFeel.setPlasticTheme(PlasticLookAndFeel.createMyDefaultTheme());
-			PlasticLookAndFeel.setTabStyle(PlasticLookAndFeel.TAB_STYLE_DEFAULT_VALUE);
-			PlasticLookAndFeel.setHighContrastFocusColorsEnabled(false);
-		} else if (selectedLaf != null && selectedLaf.getClass() == MetalLookAndFeel.class) {
-			MetalLookAndFeel.setCurrentTheme(new DefaultMetalTheme());
-		}
-
-		// Work around caching in MetalRadioButtonUI
-		JRadioButton radio = new JRadioButton();
-		radio.getUI().uninstallUI(radio);
-		JCheckBox checkBox = new JCheckBox();
-		checkBox.getUI().uninstallUI(checkBox);
-
-		if (selectedLaf != null) {
-			try {
-				UIManager.setLookAndFeel(selectedLaf);
-			} catch (UnsupportedLookAndFeelException e) {
-				LOGGER.warn("Can't change look and feel", e);
+			if (selectedLaf instanceof PlasticLookAndFeel) {
+				PlasticLookAndFeel.setPlasticTheme(PlasticLookAndFeel.createMyDefaultTheme());
+				PlasticLookAndFeel.setTabStyle(PlasticLookAndFeel.TAB_STYLE_DEFAULT_VALUE);
+				PlasticLookAndFeel.setHighContrastFocusColorsEnabled(false);
+			} else if (selectedLaf != null && selectedLaf.getClass() == MetalLookAndFeel.class) {
+				MetalLookAndFeel.setCurrentTheme(new DefaultMetalTheme());
 			}
-		}
 
-		lookAndFeelInitialized = true;
+			// Work around caching in MetalRadioButtonUI
+			JRadioButton radio = new JRadioButton();
+			radio.getUI().uninstallUI(radio);
+			JCheckBox checkBox = new JCheckBox();
+			checkBox.getUI().uninstallUI(checkBox);
+
+			if (selectedLaf != null) {
+				try {
+					UIManager.setLookAndFeel(selectedLaf);
+				} catch (UnsupportedLookAndFeelException e) {
+					LOGGER.warn("Can't change look and feel", e);
+				}
+			}
+
+			lookAndFeelInitialized = true;
+		}
 	}
 
 	/**
@@ -185,6 +200,14 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 		assert this.configuration != null;
 		Options.setDefaultIconSize(new Dimension(18, 18));
 		Options.setUseNarrowButtons(true);
+
+		// Set view level, can be omitted if ViewLevel is implemented in configuration
+		// by setting the view level as variable initialization
+		if (configuration.isHideAdvancedOptions()) {
+			viewLevel = ViewLevel.NORMAL;
+		} else {
+			viewLevel = ViewLevel.ADVANCED;
+		}
 
 		// Global options
 		Options.setTabIconsEnabled(true);
@@ -202,11 +225,11 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 		// http://propedit.sourceforge.jp/propertieseditor.jnlp
 		Font sf = null;
 
-		// Set an unicode font for testing exotics languages (japanese)
-		final String language = configuration.getLanguage();
+		// Set an unicode font for testing exotic languages (Japanese)
+		final String language = configuration.getLanguageTag();
 
-		if (language != null && (language.equals("ja") || language.startsWith("zh"))) {
-			sf = new Font("Serif", Font.PLAIN, 12);
+		if (language != null && (language.equals("ja") || language.startsWith("zh") || language.equals("ko"))) {
+			sf = new Font("SansSerif", Font.PLAIN, 12);
 		}
 
 		if (sf != null) {
@@ -243,6 +266,7 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 			UIManager.put("ToolBar.font", sf);
 			UIManager.put("ToolTip.font", sf);
 			UIManager.put("Tree.font", sf);
+			UIManager.put("Spinner.font", sf);
 		}
 
 		setTitle("Test");
@@ -298,45 +322,62 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 			title = title + "  [" + Messages.getString("TracesTab.10").toUpperCase() + "]";
 		}
 
-		this.setTitle(title);
-		this.setDefaultCloseOperation(JFrame.HIDE_ON_CLOSE);
-		Dimension screenSize = getToolkit().getScreenSize();
-
+		setTitle(title);
+		setDefaultCloseOperation(JFrame.HIDE_ON_CLOSE);
 		if (screenSize.width < MINIMUM_SIZE.width || screenSize.height < MINIMUM_SIZE.height) {
 			setMinimumSize(screenSize);
 		} else {
 			setMinimumSize(MINIMUM_SIZE);
 		}
 
-		if (screenSize.width < PREFERRED_SIZE.width || screenSize.height < PREFERRED_SIZE.height) {
+		String ss = configuration.getScreenSize();
+		storedScreenSize.height = Integer.parseInt(ss.substring(ss.indexOf("x") + 1));
+		storedScreenSize.width = Integer.parseInt(ss.substring(0, ss.indexOf("x")));
+		String[] windowGeometryValues = configuration.getWindowGeometry().split(",");
+		int posX = Integer.parseInt(windowGeometryValues[0].substring(windowGeometryValues[0].indexOf("=") + 1));
+		int posY = Integer.parseInt(windowGeometryValues[1].substring(windowGeometryValues[1].indexOf("=") + 1));
+		storedWindowSize.width = Integer.parseInt(windowGeometryValues[2].substring(windowGeometryValues[2].indexOf("=") + 1));
+		storedWindowSize.height = Integer.parseInt(windowGeometryValues[3].substring(windowGeometryValues[3].indexOf("=") + 1));
+		setSize(storedWindowSize);
+		boolean screenChanged = false;
+		if (storedScreenSize.width != screenSize.getWidth() || storedScreenSize.height != screenSize.getHeight()) {
+			setSize(STANDARD_SIZE);
+			screenChanged = true;
+		} else if (configuration.getWindowExtendedState() != NORMAL) {
+			setExtendedState(configuration.getWindowExtendedState());
+		} else if (screenSize.width < storedWindowSize.width || screenSize.height < storedWindowSize.height) {
 			setSize(screenSize);
-		} else {
-			setSize(PREFERRED_SIZE);
 		}
 
 		// Customize the colors used in tooltips
 		UIManager.put("ToolTip.background", new ColorUIResource(PMS.getConfiguration().getToolTipBackgroundColor()));
-		Border border = BorderFactory.createLineBorder(PMS.getConfiguration().getToolTipBackgroundColor());
+		Border border = BorderFactory.createLineBorder(PMS.getConfiguration().getToolTipBackgroundColor(), 4);
 		UIManager.put("ToolTip.border", border);
 		UIManager.put("ToolTip.foreground", new ColorUIResource(PMS.getConfiguration().getToolTipForegroundColor()));
 
 		// Display tooltips immediately and for a long time
-		ToolTipManager.sharedInstance().setInitialDelay(0);
+		ToolTipManager.sharedInstance().setInitialDelay(400);
 		ToolTipManager.sharedInstance().setDismissDelay(60000);
+		ToolTipManager.sharedInstance().setReshowDelay(400);
 
 		setResizable(true);
 		Dimension paneSize = getSize();
-		setLocation(
+		if (posX == -1 && posY == -1 || screenChanged) { // first run of UMS or screen/desktop was changed so set the position to the middle of the screen
+			setLocation(
 			((screenSize.width > paneSize.width) ? ((screenSize.width - paneSize.width) / 2) : 0),
 			((screenSize.height > paneSize.height) ? ((screenSize.height - paneSize.height) / 2) : 0)
-		);
+			);
+		} else {
+			setLocation(posX, posY);
+		}
+
 		if (!configuration.isMinimized() && System.getProperty(START_SERVICE) == null) {
 			setVisible(true);
 		}
 		PMS.get().getRegistry().addSystemTray(this);
 	}
 
-	protected static ImageIcon readImageIcon(String filename) {
+	public static ImageIcon readImageIcon(String filename) {
 		URL url = LooksFrame.class.getResource("/resources/images/" + filename);
 		return new ImageIcon(url);
 	}
@@ -372,8 +413,7 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 		toolBar.add(new JPanel());
 
 		// Apply the orientation to the toolbar and all components in it
-		Locale locale = new Locale(configuration.getLanguage());
-		ComponentOrientation orientation = ComponentOrientation.getOrientation(locale);
+		ComponentOrientation orientation = ComponentOrientation.getOrientation(PMS.getLocale());
 		toolBar.applyComponentOrientation(orientation);
 
 		panel.add(toolBar, BorderLayout.NORTH);
@@ -399,7 +439,7 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 		tt = new TracesTab(configuration, this);
 		gt = new GeneralTab(configuration, this);
 		pt = new PluginTab(configuration, this);
-		nt = new NavigationShareTab(configuration, this);		
+		nt = new NavigationShareTab(configuration, this);
 		tr = new TranscodingTab(configuration, this);
 		ht = new HelpTab();
 
@@ -433,8 +473,7 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 		 * Note: Do not use applyComponentOrientation() here because it
 		 * messes with the layout of several tabs.
 		 */
-		Locale locale = new Locale(configuration.getLanguage());
-		ComponentOrientation orientation = ComponentOrientation.getOrientation(locale);
+		ComponentOrientation orientation = ComponentOrientation.getOrientation(PMS.getLocale());
 		tabbedPane.setComponentOrientation(orientation);
 
 		return tabbedPane;
@@ -457,11 +496,23 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 
 	public void quit() {
 		WindowsNamedPipe.setLoop(false);
-
+		String windowGeometry = getBounds().toString();
+		try {
+			if (getExtendedState() != NORMAL) {
+				configuration.setWindowExtendedState(getExtendedState());
+			} else {
+				configuration.setWindowExtendedState(NORMAL);
+				configuration.setWindowGeometry(windowGeometry.substring(windowGeometry.indexOf("[") + 1, windowGeometry.indexOf("]")));
+			}
+			configuration.setScreenSize((int) screenSize.getWidth() + "x" + (int) screenSize.getHeight());
+		} catch (Exception e) {
+			LOGGER.warn("Failed to save window geometry and size: {}", e.getMessage());
+			LOGGER.debug("", e);
+		}
 		try {
 			Thread.sleep(100);
 		} catch (InterruptedException e) {
-			LOGGER.error(null, e);
+			LOGGER.error("Interrupted during shutdown: {}", e);
 		}
 
 		System.exit(0);
@@ -561,7 +612,7 @@ public class LooksFrame extends JFrame implements IFrame, Observer {
 
 	@Override
 	public void updateRenderer(RendererConfiguration renderer) {
-		st.updateRenderer(renderer);
+		StatusTab.updateRenderer(renderer);
 	}
 
 	@Override

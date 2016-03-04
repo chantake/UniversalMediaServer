@@ -7,16 +7,17 @@
 		<link rel="stylesheet" href="/files/web-wide.css" type="text/css" media="screen and (min-width: 1081px)">
 		<link rel="icon" href="/files/favicon.ico" type="image/x-icon">
 		<script src="/files/jquery.min.js"></script>
-        <script src="/files/jquery.ums.js"></script>
-        <title>{{name}}</title>
+		<script src="/files/jquery.ums.js"></script>
+		<script src="/files/js.cookie-2.1.0.min.js"></script>
+		<title>{{name}}</title>
 	</head>
 	<body id="ContentPage">
 		<script>
 {{#prevId}}
-			function prev() {window.location.replace('/play/{{prevId}}');}
+			function prev() {window.location.replace('/play/{{prevId}}?html5=1');}
 {{/prevId}}
 {{#nextId}}
-			function next() {window.location.replace('/play/{{nextId}}');}
+			function next() {window.location.replace('/play/{{nextId}}?html5=1');}
 {{/nextId}}
 {{#isVideo}}
 			function flash() {window.location.replace('/play/{{id1}}?flash=1');}

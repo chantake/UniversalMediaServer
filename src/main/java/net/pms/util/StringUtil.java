@@ -1,7 +1,7 @@
 /*
  * Universal Media Server, for streaming any medias to DLNA
  * compatible renderers based on the http://www.ps3mediaserver.org.
- * Copyright (C) 2012  UMS developers.
+ * Copyright (C) 2012 UMS developers.
  *
  * This program is a free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -25,6 +25,11 @@ import java.io.IOException;
 import java.io.Writer;
 import java.util.Formatter;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import javax.swing.JEditorPane;
+import javax.swing.JTextPane;
+import javax.swing.text.html.HTMLEditorKit;
 import static org.apache.commons.lang3.StringUtils.isBlank;
 import org.apache.commons.lang3.text.translate.UnicodeUnescaper;
 import org.slf4j.Logger;
@@ -102,10 +107,22 @@ public class StringUtil {
 		 * s = s.replace("\"", "&quot;");
 		 * s = s.replace("'", "&apos;");
 		 */
-		
+
 		// The second encoding/escaping of & is not a bug, it's what effectively adds the second layer of encoding/escaping
 		s = s.replace("&", "&amp;");
 		return s;
+	}
+
+	/**
+	 * Removes xml character representations.
+	 *
+	 * @param s String to be cleaned
+	 * @return Encoded String
+	 */
+	public static String unEncodeXML(String s) {
+		// Note: ampersand substitution must be first in order to undo double transformations
+		// TODO: support ' and " if/when required, see encodeXML() above
+		return s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">");
 	}
 
 	/**
@@ -174,7 +191,8 @@ public class StringUtil {
 	}
 
 	/**
-	 * Removes leading zeros up to the nth char of an hh:mm:ss time string.
+	 * Removes leading zeros up to the nth char of an hh:mm:ss time string,
+	 * normalizing it first if necessary.
 	 *
 	 * @param t time string.
 	 * @param n position to stop checking
@@ -184,10 +202,20 @@ public class StringUtil {
 	public static String shortTime(String t, int n) {
 		n = n < 8 ? n : 8;
 		if (!isBlank(t)) {
+			if (t.startsWith("NOT_IMPLEMENTED")) {
+				return t.length() > 15 ? t.substring(15) : " ";
+			}
 			int i = t.indexOf(".");
 			// Throw out the decimal portion, if any
 			if (i > -1) {
 				t = t.substring(0, i);
+			}
+			int l = t.length();
+			// Normalize if necessary
+			if (l < 8) {
+				t = "00:00:00".substring(0, 8 - l) + t;
+			} else if (l > 8) {
+				t = t.substring(l - 8);
 			}
 			for (i = 0; i < n; i++) {
 				if (t.charAt(i) != "00:00:00".charAt(i)) {
@@ -257,7 +285,7 @@ public class StringUtil {
 	 * otherwise returns the string as is.
 	 *
 	 * @param arg The argument string
-	 * @return The string, optionally in quotes. 
+	 * @return The string, optionally in quotes.
 	 */
 	public static String quoteArg(String arg) {
 		if (arg != null && arg.indexOf(' ') > -1) {
@@ -267,4 +295,116 @@ public class StringUtil {
 		return arg;
 	}
 
+	/**
+	 * Fill a string in a unicode safe way.
+	 *
+	 * @param subString The <code>String</code> to be filled with
+	 * @param count The number of times to repeat the <code>String</code>
+	 * @return The filled string
+	 */
+	public static String fillString(String subString, int count) {
+		StringBuilder sb = new StringBuilder(subString.length() * count);
+		for (int i = 0; i < count; i++) {
+			sb.append(subString);
+		}
+		return sb.toString();
+	}
+
+	/**
+	 * Fill a string in a unicode safe way provided that the char array contains
+	 * a valid unicode sequence.
+	 *
+	 * @param chars The <code>char[]</code> to be filled with
+	 * @param count The number of times to repeat the <code>char[]</code>
+	 * @return The filled string
+	 */
+	public static String fillString(char[] chars, int count) {
+		StringBuilder sb = new StringBuilder(chars.length * count);
+		for (int i = 0; i < count; i++) {
+			sb.append(chars);
+		}
+		return sb.toString();
+	}
+
+	/**
+	 * Fill a string in a unicode safe way. 8 bit (&lt; 256) code points
+	 * equals ISO 8859-1 codes.
+	 *
+	 * @param codePoint The unicode code point to be filled with
+	 * @param count The number of times to repeat the unicode code point
+	 * @return The filled string
+	 */
+	public static String fillString(int codePoint, int count) {
+		return fillString(Character.toChars(codePoint), count);
+	}
+
+	/**
+	 * Returns the <code>body</code> of a HTML {@link String} formatted by
+	 * {@link HTMLEditorKit} as typically used by {@link JEditorPane} and
+	 * {@link JTextPane} stripped for tags, newline, indentation and with
+	 * <code>&lt;br&gt;</code> tags converted to newline.<br>
+	 * <br>
+	 * <strong>Note: This is not a universal or sophisticated HTML stripping
+	 * method, but is purpose built for these circumstances.</strong>
+	 *
+	 * @param html the HTML formatted text as described above
+	 * @return The "deHTMLified" text
+	 */
+	public static String stripHTML(String html) {
+		Pattern pattern = Pattern.compile("<body>(.*)</body>", Pattern.CASE_INSENSITIVE + Pattern.DOTALL);
+		Matcher matcher = pattern.matcher(html);
+		if (matcher.find()) {
+			return matcher.group(1).replaceAll("\n    ", "").trim().replaceAll("(?i)<br>", "\n").replaceAll("<.*?>","");
+		} else {
+			throw new IllegalArgumentException("HTML text not as expected, must have <body> section");
+		}
+	}
+
+	/**
+	 * Convenience method to check if a {@link String} is not <code>null</code>
+	 * and contains anything other than whitespace.
+	 *
+	 * @param s the {@link String} to evaluate
+	 * @return The verdict
+	 */
+	public static boolean hasValue(String s) {
+		return s != null && !s.trim().isEmpty();
+	}
+
+	/**
+	 * Escapes {@link org.apache.lucene} special characters with backslash
+	 */
+	public static String luceneEscape(final String s) {
+		StringBuilder sb = new StringBuilder();
+
+		for (int i = 0;i < s.length(); i++) {
+			String c = s.substring(i, i+1);
+			switch (c) {
+				case "+":
+				case "-":
+				case "&":
+				case "|":
+				case "!":
+				case "(":
+				case ")":
+				case "{":
+				case "}":
+				case "[":
+				case "]":
+				case "^":
+				case "\"":
+				case "~":
+				case "*":
+				case "?":
+				case ":":
+				case "\\":
+				case "/":
+					sb.append("\\").append(c);
+					break;
+				default:
+					sb.append(c);
+			}
+		}
+		return sb.toString();
+	}
 }

@@ -311,7 +311,7 @@ public class Request extends HTTPResource {
 					if (!configuration.isShowCodeThumbs() && !dlna.isCodeValid(dlna)) {
 						inputStream = dlna.getGenericThumbnailInputStream(null);
 					} else {
-						if (mediaRenderer.isMediaParserV2()) {
+						if (mediaRenderer.isUseMediaInfo()) {
 							dlna.checkThumbnail();
 						}
 						inputStream = dlna.getThumbnailInputStream();
@@ -356,7 +356,7 @@ public class Request extends HTTPResource {
 						LOGGER.error("There is no inputstream to return for " + name);
 					} else {
 						startStopListenerDelegate.start(dlna);
-						output(output, "Content-Type: " + getRendererMimeType(dlna.mimeType(), mediaRenderer));
+						output(output, "Content-Type: " + getRendererMimeType(dlna.mimeType(), mediaRenderer, dlna.getMedia()));
 
 						if (dlna.getMedia() != null && !configuration.isDisableSubtitles()) {
 							// Some renderers (like Samsung devices) allow a custom header for a subtitle URL
@@ -364,7 +364,7 @@ public class Request extends HTTPResource {
 							if (subtitleHttpHeader != null && !"".equals(subtitleHttpHeader)) {
 								// Device allows a custom subtitle HTTP header; construct it
 								DLNAMediaSubtitle sub = dlna.getMediaSubtitle();
-								if (sub != null) {
+								if (sub != null && sub.isStreamable()) {
 									String subtitleUrl;
 									String subExtension = sub.getType().getExtension();
 									if (isNotBlank(subExtension)) {
@@ -451,12 +451,6 @@ public class Request extends HTTPResource {
 			output(output, "Expires: " + getFUTUREDATE() + " GMT");
 			inputStream = getResourceInputStream(argument);
 		} else if ((method.equals("GET") || method.equals("HEAD")) && (argument.equals("description/fetch") || argument.endsWith("1.0.xml"))) {
-			String profileName = "";
-			if (configuration.isAppendProfileName()) {
-				profileName = " [" + configuration.getProfileName() + "]";
-			}
-
-			String serverName = configuration.getServerName();
 			output(output, CONTENT_TYPE);
 			output(output, "Cache-Control: no-cache");
 			output(output, "Expires: 0");
@@ -477,7 +471,7 @@ public class Request extends HTTPResource {
 
 				if (xbox360) {
 					LOGGER.debug("DLNA changes for Xbox 360");
-					s = s.replace("Universal Media Server", serverName + profileName + " : Windows Media Connect");
+					s = s.replace("Universal Media Server", configuration.getServerDisplayName() + " : Windows Media Connect");
 					s = s.replace("<modelName>UMS</modelName>", "<modelName>Windows Media Connect</modelName>");
 					s = s.replace("<serviceList>", "<serviceList>" + CRLF + "<service>" + CRLF +
 						"<serviceType>urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1</serviceType>" + CRLF +
@@ -486,7 +480,7 @@ public class Request extends HTTPResource {
 						"<controlURL>/upnp/mrr/control</controlURL>" + CRLF +
 						"</service>" + CRLF);
 				} else {
-					s = s.replace("Universal Media Server", serverName + profileName);
+					s = s.replace("Universal Media Server", configuration.getServerDisplayName());
 				}
 
 				inputStream = new ByteArrayInputStream(s.getBytes());
@@ -682,7 +676,7 @@ public class Request extends HTTPResource {
 					parentFolder = files.get(0).getParent();
 				}
 
-				if (browseDirectChildren && mediaRenderer.isMediaParserV2() && mediaRenderer.isDLNATreeHack()) {
+				if (browseDirectChildren && mediaRenderer.isUseMediaInfo() && mediaRenderer.isDLNATreeHack()) {
 					// with the new parser, files are parsed and analyzed *before*
 					// creating the DLNA tree, every 10 items (the ps3 asks 10 by 10),
 					// so we do not know exactly the total number of items in the DLNA folder to send
@@ -877,8 +871,8 @@ public class Request extends HTTPResource {
 	 * Returns the string value that is enclosed by the left and right tag in a content string.
 	 * Only the first match of each tag is used to determine positions. If either of the tags
 	 * cannot be found, null is returned.
-	 * @param content The entire {@link String} that needs to be searched for the left and right tag. 
-	 * @param leftTag The {@link String} determining the match for the left tag. 
+	 * @param content The entire {@link String} that needs to be searched for the left and right tag.
+	 * @param leftTag The {@link String} determining the match for the left tag.
 	 * @param rightTag The {@link String} determining the match for the right tag.
 	 * @return The {@link String} that was enclosed by the left and right tag.
 	 */

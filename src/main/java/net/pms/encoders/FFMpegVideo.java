@@ -169,6 +169,8 @@ public class FFMpegVideo extends Player {
 			scalePadFilterChain.add("scale=" + scaleWidth + ":" + scaleHeight);
 		}
 
+		filterChain.addAll(scalePadFilterChain);
+
 		boolean override = true;
 		if (renderer instanceof RendererConfiguration.OutputOverride) {
 			RendererConfiguration.OutputOverride or = (RendererConfiguration.OutputOverride)renderer;
@@ -176,14 +178,20 @@ public class FFMpegVideo extends Player {
 		}
 
 		if (!isDisableSubtitles(params) && override) {
+			boolean isSubsManualTiming = true;
 			StringBuilder subsFilter = new StringBuilder();
-			if (params.sid.getType().isText()) {
-				String originalSubsFilename;
+			if (params.sid != null && params.sid.getType().isText()) {
+				boolean isSubsASS = params.sid.getType() == SubtitleType.ASS;
+				String originalSubsFilename = null;
 				String subsFilename;
-				if (params.sid.isEmbedded() || configuration.isFFmpegFontConfig() || is3D) {
+
+				// Assume when subs are in the ASS format and video is 3D then subs not need conversion to 3D
+				if (is3D && !isSubsASS) {
 					originalSubsFilename = SubtitleUtils.getSubtitles(dlna, media, params, configuration, SubtitleType.ASS).getAbsolutePath();
-				} else {
+				} else if (params.sid.isExternal()) {
 					originalSubsFilename = params.sid.getExternalFile().getAbsolutePath();
+				} else if (params.sid.isEmbedded()) {
+					originalSubsFilename = dlna.getSystemName();
 				}
 
 				if (originalSubsFilename != null) {
@@ -212,37 +220,39 @@ public class FFMpegVideo extends Player {
 					subsFilename = s.toString();
 					subsFilename = subsFilename.replace(",", "\\,");
 					subsFilter.append("subtitles=").append(subsFilename);
+					if (params.sid.isEmbedded()) {
+						subsFilter.append(":si=").append(params.sid.getId());
+					}
 
-					// Set the resolution for subtitles to use
-					int subtitlesWidth = scaleWidth; 
-					int subtitlesHeight = scaleHeight;
-					if (params.sid.isExternal() && params.sid.getType() != SubtitleType.ASS || configuration.isFFmpegFontConfig()) {
-						if (subtitlesWidth > 0 && subtitlesHeight > 0) {
-							// Let ASS/SSA subtitles specify their own resolution
-							if (params.sid.getType() == SubtitleType.ASS) {
-								setSubtitlesResolution(originalSubsFilename, subtitlesWidth, subtitlesHeight);
-							}
-
-							if (!is3D) {
-								subsFilter.append(":").append(subtitlesWidth).append("x").append(subtitlesHeight);
-							}
-
-							// Set the input subtitles character encoding if not UTF-8
-							if (!params.sid.isExternalFileUtf8()) {
-								String encoding = isNotBlank(configuration.getSubtitlesCodepage()) ?
-										configuration.getSubtitlesCodepage() : params.sid.getExternalFileCharacterSet() != null ?
-										params.sid.getExternalFileCharacterSet() : null;
-								if (encoding != null) {
-									subsFilter.append(":").append(encoding);
-								}
-							}
+					// Set the input subtitles character encoding if not UTF-8
+					if (!params.sid.isSubsUtf8()) {
+						String encoding = isNotBlank(configuration.getSubtitlesCodepage()) ?
+						configuration.getSubtitlesCodepage() : params.sid.getSubCharacterSet() != null ?
+						params.sid.getSubCharacterSet() : null;
+						if (encoding != null) {
+							subsFilter.append(":charenc=").append(encoding);
 						}
+					}
+
+					// If the FFmpeg font config is enabled than we need to add settings to the filter. TODO there could be also changed the font type. See http://ffmpeg.org/ffmpeg-filters.html#subtitles-1
+					if (configuration.isFFmpegFontConfig() && !is3D && !isSubsASS) { // Do not force style for 3D videos and ASS subtitles
+						subsFilter.append(":force_style=");
+						subsFilter.append("'");
+						subsFilter.append("Fontname=").append(configuration.getFont());
+						// XXX (valib) If the font size is not acceptable it could be calculated better taking in to account the original video size. Unfortunately I don't know how to do that.
+						subsFilter.append(",Fontsize=").append((int) 15 * Double.parseDouble(configuration.getAssScale()));
+						subsFilter.append(",PrimaryColour=").append(SubtitleUtils.convertColourToASSColourString(configuration.getSubsColor()));
+						subsFilter.append(",Outline=").append(configuration.getAssOutline());
+						subsFilter.append(",Shadow=").append(configuration.getAssShadow());
+						subsFilter.append(",MarginV=").append(configuration.getAssMargin());
+						subsFilter.append("'");
 					}
 				}
 			} else if (params.sid.getType().isPicture()) {
 				if (params.sid.getId() < 100) {
 					// Embedded
 					subsFilter.append("[0:v][0:s:").append(media.getSubtitleTracksList().indexOf(params.sid)).append("]overlay");
+					isSubsManualTiming = false;
 				} else {
 					// External
 					videoFilterOptions.add("-i");
@@ -251,12 +261,12 @@ public class FFMpegVideo extends Player {
 				}
 			}
 			if (isNotBlank(subsFilter)) {
-				if (params.timeseek > 0) {
+				if (params.timeseek > 0 && isSubsManualTiming) {
 					filterChain.add("setpts=PTS+" + params.timeseek + "/TB"); // based on https://trac.ffmpeg.org/ticket/2067
 				}
 
 				filterChain.add(subsFilter.toString());
-				if (params.timeseek > 0) {
+				if (params.timeseek > 0 && isSubsManualTiming) {
 					filterChain.add("setpts=PTS-STARTPTS"); // based on https://trac.ffmpeg.org/ticket/2067
 				}
 			}
@@ -265,8 +275,6 @@ public class FFMpegVideo extends Player {
 		String overrideVF = renderer.getFFmpegVideoFilterOverride();
 		if (StringUtils.isNotEmpty(overrideVF)) {
 			filterChain.add(overrideVF);
-		} else {
-			filterChain.addAll(scalePadFilterChain);
 		}
 
 		// Convert 3D video to the other output 3D format
@@ -846,7 +854,7 @@ public class FFMpegVideo extends Player {
 			)
 		) {
 			boolean deferToMencoder = false;
-			if (configuration.isFFmpegDeferToMEncoderForProblematicSubtitles() && params.sid.isEmbedded()) {
+			if (configuration.isFFmpegDeferToMEncoderForProblematicSubtitles() && params.sid.isEmbedded() && params.sid.getType().isText()) {
 				deferToMencoder = true;
 				LOGGER.trace(prependTraceReason + "the user setting is enabled.");
 			} else if (media.isEmbeddedFontExists()) {
@@ -1305,32 +1313,39 @@ public class FFMpegVideo extends Player {
 		return builder.getPanel();
 	}
 
+	/**
+	 * A simple arg parser with basic quote comprehension
+	 */
 	protected static List<String> parseOptions(String str) {
 		return str == null ? null : parseOptions(str, new ArrayList<String>());
 	}
 
 	protected static List<String> parseOptions(String str, List<String> cmdList) {
-		while (str.length() > 0) {
-			if (str.charAt(0) == '\"') {
-				int pos = str.indexOf('"', 1);
-				if (pos == -1) {
-					// No ", error
-					break;
-				}
-				String tmp = str.substring(1, pos);
-				cmdList.add(tmp.trim());
-				str = str.substring(pos + 1);
+		int start, pos = 0, len = str.length();
+		while (pos < len) {
+			// New arg
+			if (str.charAt(pos) == '\"') {
+				start = pos + 1;
+				// Find next quote. No support for escaped quotes here, and
+				// -1 means no matching quote but be lax and accept the fragment anyway
+				pos = str.indexOf('"', start);
 			} else {
-				// New arg, find space
-				int pos = str.indexOf(' ');
-				if (pos == -1) {
-					// No space, we're done
-					cmdList.add(str);
-					break;
-				}
-				String tmp = str.substring(0, pos);
-				cmdList.add(tmp.trim());
-				str = str.substring(pos + 1);
+				start = pos;
+				// Find next space
+				pos = str.indexOf(' ', start);
+			}
+			if (pos == -1) {
+				// We're done
+				pos = len;
+			}
+			// Add the arg, if any
+			if (pos - start > 0) {
+				cmdList.add(str.substring(start, pos).trim());
+			}
+			pos++;
+			// Advance to next non-space char
+			while (pos < len && str.charAt(pos) == ' ') {
+				pos++;
 			}
 		}
 		return cmdList;
@@ -1381,7 +1396,7 @@ public class FFMpegVideo extends Player {
 		if (configuration.isResumeEnabled() && dlna.getMedia() != null) {
 			long duration = force ? 0 : (long) dlna.getMedia().getDurationInSeconds();
 			if (duration == 0 || duration == DLNAMediaInfo.TRANS_SIZE) {
-				OutputTextLogger ffParser = new OutputTextLogger(null, pw) {
+				OutputTextLogger ffParser = new OutputTextLogger(null) {
 					@Override
 					public boolean filter(String line) {
 						if (reDuration.reset(line).find()) {

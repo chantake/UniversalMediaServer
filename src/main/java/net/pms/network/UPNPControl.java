@@ -9,6 +9,7 @@ import java.util.*;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import net.pms.PMS;
+import net.pms.util.StringUtil;
 import net.pms.util.BasicPlayer;
 import org.apache.commons.lang.StringUtils;
 import org.fourthline.cling.UpnpService;
@@ -144,7 +145,7 @@ public class UPNPControl {
 		protected ActionEvent event;
 		public String uuid;
 		public String instanceID = "0"; // FIXME: unclear in what precise context a media renderer's instanceID != 0
-		public volatile HashMap<String, String> data;
+		public final HashMap<String, String> data;
 		public Map<String, String> details;
 		public LinkedHashSet<ActionListener> listeners;
 		private Thread monitor;
@@ -366,7 +367,8 @@ public class UPNPControl {
 	}
 
 	public static boolean isUpnpControllable(String uuid) {
-		if (rendererMap.containsKey(uuid)) {
+		// Disable manually for Panasonic TVs since they lie
+		if (rendererMap.containsKey(uuid) && !getDeviceDetailsString(getDevice(uuid)).contains("VIERA")) {
 			return rendererMap.get(uuid, "0").controls != 0;
 		}
 		return false;
@@ -377,7 +379,7 @@ public class UPNPControl {
 	}
 
 	public static String getFriendlyName(Device d) {
-		return d.getDetails().getFriendlyName();
+		return d != null ? d.getDetails().getFriendlyName() : null;
 	}
 
 	public static String getUUID(Device d) {
@@ -617,7 +619,7 @@ public class UPNPControl {
 
 		@Override
 		public void established(GENASubscription sub) {
-			LOGGER.debug("Subscription established: " + sub.getService().getServiceId().getId() + 
+			LOGGER.debug("Subscription established: " + sub.getService().getServiceId().getId() +
 				" on " + getFriendlyName(uuid));
 		}
 
@@ -767,7 +769,8 @@ public class UPNPControl {
 	}
 
 	public static void setAVTransportURI(Device dev, String instanceID, String uri, String metaData) {
-		send(dev, instanceID, "AVTransport", "SetAVTransportURI", "CurrentURI", uri, "CurrentURIMetaData", metaData);
+		send(dev, instanceID, "AVTransport", "SetAVTransportURI", "CurrentURI", uri,
+			"CurrentURIMetaData", metaData != null ? StringUtil.unEncodeXML(metaData) : null);
 	}
 
 	public static void setPlayMode(Device dev, String instanceID, String mode) {

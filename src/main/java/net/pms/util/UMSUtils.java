@@ -1,7 +1,7 @@
 /*
  * Universal Media Server, for streaming any medias to DLNA
  * compatible renderers based on the http://www.ps3mediaserver.org.
- * Copyright (C) 2012  UMS developers.
+ * Copyright (C) 2012 UMS developers.
  *
  * This program is a free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -27,11 +27,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.text.Collator;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.List;
 import javax.imageio.ImageIO;
+import net.coobird.thumbnailator.filters.Canvas;
+import net.coobird.thumbnailator.Thumbnails;
+import net.coobird.thumbnailator.geometry.Positions;
 import net.pms.configuration.RendererConfiguration;
 import net.pms.dlna.*;
 import net.pms.encoders.Player;
@@ -159,14 +160,6 @@ public class UMSUtils {
 		}
 	}
 
-	public static String logFormat(String msg) {
-		DateFormat dateFormat = new SimpleDateFormat("MM-dd HH:mm:ss");
-		Date date = new Date();
-
-		String[] messageDisplay = msg.replaceFirst("]", "string that should never match").split("string that should never match");
-		return dateFormat.format(date) + " " + messageDisplay[1];
-	}
-
 	private static int getHW(String[] s, int pos) {
 		if (pos > s.length - 1) {
 			return 0;
@@ -238,25 +231,9 @@ public class UMSUtils {
 		return new ByteArrayInputStream(out.toByteArray());
 	}
 
-	private static String fixTimeStr(String str) {
-		if (str.equals("NOT_IMPLEMENTED")) {
-			return " ";
-		}
-		if(str.charAt(0) == ':')   {
-			// remove stray ':' at the start
-			str = str.substring(1);
-		}
-		int pos = str.indexOf(".");
-		if (pos != -1) {
-			// remove millisecond portion
-			str = str.substring(0, pos);
-		}
-		return str;
-	}
-
 	public static String playedDurationStr(String current, String duration) {
-		String pos = fixTimeStr(StringUtil.shortTime(current, 4));
-		String dur = fixTimeStr(StringUtil.shortTime(duration, 4));
+		String pos = StringUtil.shortTime(current, 4);
+		String dur = StringUtil.shortTime(duration, 4);
 		return pos + (pos.equals("0:00") ? "" : dur.equals("0:00") ? "" : (" / " + dur));
 	}
 
@@ -393,7 +370,7 @@ public class UMSUtils {
 				sb.append("\n");
 				for (DLNAResource r : playlist) {
 					String data = r.write();
-					if (!org.apache.commons.lang.StringUtils.isEmpty(data)) {
+					if (!org.apache.commons.lang.StringUtils.isEmpty(data) && sb.indexOf(data) == -1) {
 						ExternalListener external = r.getMasterParent();
 						String id;
 						if (external != null) {
@@ -610,5 +587,67 @@ public class UMSUtils {
 			}
 			return null;
 		}
+	}
+
+	/**
+	 * @see #scaleImage(byte[], int, int, boolean)
+	 * @deprecated
+	 */
+	public static byte[] scaleImage(byte[] image, int width, int height, boolean outputBlank) {
+		return scaleImage(image, width, height, outputBlank, null);
+	}
+
+	/**
+	 * Creates a black background with the exact dimensions specified, then
+	 * centers the image on the background, preserving the aspect ratio.
+	 *
+	 * @param image
+	 * @param width
+	 * @param height
+	 * @param outputBlank whether to return null or a black image when the
+	 *                    image parameter is null
+	 * @param renderer
+	 *
+	 * @return the scaled image
+	 */
+	public static byte[] scaleImage(byte[] image, int width, int height, boolean outputBlank, RendererConfiguration renderer) {
+		ByteArrayInputStream in = null;
+		if (image == null && !outputBlank) {
+			return null;
+		} else if (image != null) {
+			in = new ByteArrayInputStream(image);
+		}
+
+		try {
+			BufferedImage img;
+			if (in != null) {
+				img = ImageIO.read(in);
+			} else {
+				img = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+			}
+			ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+			if (renderer != null && renderer.isThumbnailPadding()) {
+				Thumbnails.of(img)
+					.size(width, height)
+					.addFilter(new Canvas(width, height, Positions.CENTER, Color.BLACK))
+					.outputFormat("JPEG")
+					.outputQuality(1.0f)
+					.toOutputStream(out);
+			} else {
+				Thumbnails.of(img)
+					.size(width, height)
+					.outputFormat("JPEG")
+					.outputQuality(1.0f)
+					.toOutputStream(out);
+			}
+
+			return out.toByteArray();
+		} catch (IOException e) {
+			LOGGER.debug("Failed to resize image: {}", e.getMessage());
+			LOGGER.trace("", e);
+		}
+
+		return null;
 	}
 }

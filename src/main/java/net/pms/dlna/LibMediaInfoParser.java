@@ -1,6 +1,7 @@
 package net.pms.dlna;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.util.StringTokenizer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -9,6 +10,7 @@ import net.pms.configuration.RendererConfiguration;
 import net.pms.dlna.MediaInfo.InfoType;
 import net.pms.dlna.MediaInfo.StreamType;
 import net.pms.formats.v2.SubtitleType;
+import net.pms.util.FileUtil;
 import org.apache.commons.codec.binary.Base64;
 import static org.apache.commons.lang3.StringUtils.*;
 import org.slf4j.Logger;
@@ -24,12 +26,12 @@ public class LibMediaInfoParser {
 	private static final Pattern yearPattern = Pattern.compile(YEAR_REGEX);
 
 	private static MediaInfo MI;
-	private static Base64 base64;
 
 	static {
 		MI = new MediaInfo();
 
 		if (MI.isValid()) {
+			MI.Option("Internet", "No"); // avoid MediaInfoLib to try to connect to an Internet server for availability of newer software, anonymous statistics and retrieving information about a file
 			MI.Option("Complete", "1");
 			MI.Option("Language", "raw");
 			MI.Option("File_TestContinuousFileNames", "0");
@@ -38,8 +40,6 @@ public class LibMediaInfoParser {
 			LOGGER.debug("Option 'ParseSpeed' is set to: " + MI.Option("ParseSpeed_Get"));
 //			LOGGER.debug(MI.Option("Info_Parameters_CSV")); // It can be used to export all current MediaInfo parameters
 		}
-
-		base64 = new Base64();
 	}
 
 	public static boolean isValid() {
@@ -83,7 +83,7 @@ public class LibMediaInfoParser {
 				media.setBitrate(getBitrate(MI.Get(general, 0, "OverallBitRate")));
 				value = MI.Get(general, 0, "Cover_Data");
 				if (isNotBlank(value)) {
-					media.setThumb(getCover(value));
+					media.setThumb(new Base64().decode(value.getBytes(StandardCharsets.US_ASCII)));
 				}
 				value = MI.Get(general, 0, "Title");
 				if (isNotBlank(value)) {
@@ -95,9 +95,9 @@ public class LibMediaInfoParser {
 				}
 
 				// set Video
-				int videos = MI.Count_Get(video);
-				if (videos > 0) {
-					for (int i = 0; i < videos; i++) {
+				media.setVideoTrackCount(MI.Count_Get(video));
+				if (media.getVideoTrackCount() > 0) {
+					for (int i = 0; i < media.getVideoTrackCount(); i++) {
 						// check for DXSA and DXSB subtitles (subs in video format)
 						if (MI.Get(video, i, "Title").startsWith("Subtitle")) {
 							currentSubTrack = new DLNAMediaSubtitle();
@@ -215,7 +215,8 @@ public class LibMediaInfoParser {
 				}
 
 				// set Image
-				if (MI.Count_Get(image) > 0) {
+				media.setImageCount(MI.Count_Get(image));
+				if (media.getImageCount() > 0) {
 					getFormat(image, media, currentAudioTrack, MI.Get(image, 0, "Format").toLowerCase(), file);
 					media.setWidth(getPixelValue(MI.Get(image, 0, "Width")));
 					media.setHeight(getPixelValue(MI.Get(image, 0, "Height")));
@@ -226,7 +227,7 @@ public class LibMediaInfoParser {
 				if (subTracks > 0) {
 					for (int i = 0; i < subTracks; i++) {
 						currentSubTrack = new DLNAMediaSubtitle();
-						currentSubTrack.setType(SubtitleType.valueOfLibMediaInfoCodec(MI.Get(text, i, "Format")));
+						currentSubTrack.setSubCharacterSet(MI.Get(text, i, "Format"));
 						currentSubTrack.setType(SubtitleType.valueOfLibMediaInfoCodec(MI.Get(text, i, "CodecID")));
 						currentSubTrack.setLang(getLang(MI.Get(text, i, "Language/String")));
 						currentSubTrack.setSubtitlesTrackTitleFromMetadata((MI.Get(text, i, "Title")).trim());
@@ -457,7 +458,7 @@ public class LibMediaInfoParser {
 					media.setContainer(FormatConfiguration.MP3);
 				}
 			}
-		} else if (value.equals("ma")) {
+		} else if (value.equals("ma") || value.equals("ma / core") || value.equals("134")) {
 			if (audio.getCodecA() != null && audio.getCodecA().equals(FormatConfiguration.DTS)) {
 				format = FormatConfiguration.DTSHD;
 			}
@@ -544,6 +545,9 @@ public class LibMediaInfoParser {
 			} else if (streamType == StreamType.Audio) {
 				audio.setCodecA(format);
 			}
+		// format not found so set container type based on the file extension. It will be overwritten when the correct type will be found
+		} else if (streamType == StreamType.General && media.getContainer() == null) {
+			media.setContainer(FileUtil.getExtension(file.getAbsolutePath()));
 		}
 	}
 
@@ -618,9 +622,7 @@ public class LibMediaInfoParser {
 		try {
 			return Integer.parseInt(value);
 		} catch (NumberFormatException e) {
-			LOGGER.trace("Could not parse bitrate from: " + value);
-			LOGGER.trace("The full error was: " + e);
-
+			LOGGER.trace("Could not parse bitrate \"{}\": ", value, e.getMessage());
 			return 0;
 		}
 	}
@@ -727,17 +729,5 @@ public class LibMediaInfoParser {
 		}
 
 		return (h * 3600) + (m * 60) + s;
-	}
-
-	public static byte[] getCover(String based64Value) {
-		try {
-			if (base64 != null) {
-				return base64.decode(based64Value.getBytes());
-			}
-		} catch (Exception e) {
-			LOGGER.error("Error in decoding thumbnail data", e);
-		}
-
-		return null;
 	}
 }

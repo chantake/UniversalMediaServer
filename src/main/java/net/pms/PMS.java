@@ -19,16 +19,26 @@
 
 package net.pms;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.LoggerContext;
 import com.sun.jna.Platform;
 import com.sun.net.httpserver.HttpServer;
 import java.awt.*;
+import java.awt.image.BufferedImage;
 import java.io.*;
 import java.net.BindException;
+import java.nio.charset.StandardCharsets;
+import java.security.AccessControlException;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.List;
 import java.util.Map.Entry;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.logging.LogManager;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import javax.imageio.ImageIO;
 import javax.jmdns.JmDNS;
 import javax.swing.*;
 import net.pms.configuration.Build;
@@ -36,6 +46,7 @@ import net.pms.configuration.NameFilter;
 import net.pms.configuration.PmsConfiguration;
 import net.pms.configuration.DeviceConfiguration;
 import net.pms.configuration.RendererConfiguration;
+import net.pms.database.Tables;
 import net.pms.dlna.*;
 import net.pms.dlna.virtual.MediaLibrary;
 import net.pms.encoders.Player;
@@ -45,8 +56,9 @@ import net.pms.external.ExternalListener;
 import net.pms.formats.Format;
 import net.pms.formats.FormatFactory;
 import net.pms.io.*;
+import net.pms.logging.CacheLogger;
 import net.pms.logging.FrameAppender;
-import net.pms.logging.LoggingConfigFileLoader;
+import net.pms.logging.LoggingConfig;
 import net.pms.network.ChromecastMgr;
 import net.pms.network.HTTPServer;
 import net.pms.network.ProxyServer;
@@ -58,7 +70,9 @@ import net.pms.util.*;
 import org.apache.commons.configuration.ConfigurationException;
 import org.apache.commons.configuration.event.ConfigurationEvent;
 import org.apache.commons.configuration.event.ConfigurationListener;
-import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang.WordUtils;
+import org.fest.util.Files;
+import org.slf4j.ILoggerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,9 +80,13 @@ public class PMS {
 	private static final String SCROLLBARS = "scrollbars";
 	private static final String NATIVELOOK = "nativelook";
 	private static final String CONSOLE = "console";
+	private static final String HEADLESS = "headless";
 	private static final String NOCONSOLE = "noconsole";
 	private static final String PROFILES = "profiles";
+	private static final String PROFILE = "^(?i)profile(?::|=)([^\"*<>?]+)$";
 	private static final String TRACE = "trace";
+	public static final String NAME = "Universal Media Server";
+	public static final String CROWDIN_LINK = "https://crowdin.com/project/universalmediaserver";
 
 	/**
 	 * @deprecated The version has moved to the resources/project.properties file. Use {@link #getVersion()} instead.
@@ -105,6 +123,8 @@ public class PMS {
 
 	private JmDNS jmDNS;
 
+	public static BufferedImage thumbnailOverlayImage;
+
 	/**
 	 * Returns a pointer to the PMS GUI's main window.
 	 * @return {@link net.pms.newgui.IFrame} Main PMS window.
@@ -137,22 +157,26 @@ public class PMS {
 	private static PMS instance = null;
 
 	/**
-	 * @deprecated This field is not used and will be removed in the future.
+	 * Array of {@link net.pms.configuration.RendererConfiguration} that have
+	 * been found by UMS.<br><br>
+	 *
+	 * Important! If iteration is done on this list it's not thread safe unless
+	 * the iteration loop is enclosed by a <code>synchronized</code> block on
+	 * the <code>List itself</code>.
 	 */
-	@Deprecated
-	public final static SimpleDateFormat sdfDate = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US);
+	private final List<RendererConfiguration> foundRenderers = Collections.synchronizedList(new ArrayList<RendererConfiguration>());
 
 	/**
-	 * @deprecated This field is not used and will be removed in the future.
+	 * The returned <code>List</code> itself is thread safe, but the objects
+	 * it's holding is not. Any looping/iterating of this <code>List</code>
+	 * MUST be enclosed in:
+	 * S<pre><code>
+	 * synchronized(getFoundRenderers()) {
+	 *      ..code..
+	 * }
+	 * </code></pre>
+	 * @return {@link #foundRenderers}
 	 */
-	@Deprecated
-	public final static SimpleDateFormat sdfHour = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US);
-
-	/**
-	 * Array of {@link net.pms.configuration.RendererConfiguration} that have been found by PMS.
-	 */
-	private final ArrayList<RendererConfiguration> foundRenderers = new ArrayList<>();
-
 	public List<RendererConfiguration> getFoundRenderers() {
 		return foundRenderers;
 	}
@@ -238,56 +262,21 @@ public class PMS {
 	 * @see net.pms.dlna.DLNAMediaDatabase
 	 */
 	private DLNAMediaDatabase database;
-
-	private synchronized void initializeDatabase() {
-		database = new DLNAMediaDatabase("medias"); // TODO: rename "medias" -> "cache"
-		database.init(false);
-	}
+	private Object databaseLock = new Object();
 
 	/**
 	 * Used to get the database. Needed in the case of the Xbox 360, that requires a database.
 	 * for its queries.
-	 * @return (DLNAMediaDatabase) a reference to the database instance or <b>null</b> if one isn't defined
-	 * (e.g. if the cache is disabled).
+	 * @return (DLNAMediaDatabase) a reference to the database.
 	 */
-	public synchronized DLNAMediaDatabase getDatabase() {
-		if (configuration.getUseCache()) {
+	public DLNAMediaDatabase getDatabase() {
+		synchronized (databaseLock) {
 			if (database == null) {
-				initializeDatabase();
+				database = new DLNAMediaDatabase("medias");
+				database.init(false);
 			}
-
 			return database;
 		}
-
-		return null;
-	}
-
-	/**
-	 * Helper method for displayBanner: return a file or directory's
-	 * permissions in the Unix ls style e.g.: "rw" (read-write),
-	 * "r-" (read-only) &c.
-	 */
-	private String getPathPermissions(String path) {
-		String permissions;
-		File file = new File(path);
-
-		if (file.exists()) {
-			if (file.isFile()) {
-				permissions = String.format("%s%s",
-					FileUtil.isFileReadable(file) ? "r" : "-",
-					FileUtil.isFileWritable(file) ? "w" : "-"
-				);
-			} else {
-				permissions = String.format("%s%s",
-					FileUtil.isDirectoryReadable(file) ? "r" : "-",
-					FileUtil.isDirectoryWritable(file) ? "w" : "-"
-				);
-			}
-		} else {
-			permissions = "file not found";
-		}
-
-		return permissions;
 	}
 
 	private void displayBanner() throws IOException {
@@ -309,7 +298,7 @@ public class PMS {
 		String cwd = new File("").getAbsolutePath();
 		LOGGER.info("Working directory: " + cwd);
 
-		LOGGER.info("Temp directory: " + configuration.getTempFolder());
+		LOGGER.info("Temporary directory: " + configuration.getTempFolder());
 
 		/**
 		 * Verify the java.io.tmpdir is writable; JNA requires it.
@@ -318,28 +307,32 @@ public class PMS {
 		 */
 		File javaTmpdir = new File(System.getProperty("java.io.tmpdir"));
 
-		if (!FileUtil.isDirectoryWritable(javaTmpdir)) {
+		if (!FileUtil.getFilePermissions(javaTmpdir).isWritable()) {
 			LOGGER.error("The Java temp directory \"" + javaTmpdir.getAbsolutePath() + "\" is not writable by UMS");
 			LOGGER.error("Please make sure the directory is writable for user \"" + System.getProperty("user.name") + "\"");
-			throw new IOException("Cannot write to Java temp directory");
+			throw new IOException("Cannot write to Java temp directory: " + javaTmpdir.getAbsolutePath());
 		}
 
-		LOGGER.info("Logging config file: " + LoggingConfigFileLoader.getConfigFilePath());
+		LOGGER.info("Logging configuration file: " + LoggingConfig.getConfigFilePath());
 
-		HashMap<String, String> lfps = LoggingConfigFileLoader.getLogFilePaths();
+		HashMap<String, String> lfps = LoggingConfig.getLogFilePaths();
 
-		// debug.log filename(s) and path(s)
+		// Logfile name(s) and path(s)
 		if (lfps != null && lfps.size() > 0) {
 			if (lfps.size() == 1) {
 				Entry<String, String> entry = lfps.entrySet().iterator().next();
-				LOGGER.info(String.format("%s: %s", entry.getKey(), entry.getValue()));
+				if (entry.getKey().toLowerCase().equals("default.log")) {
+					LOGGER.info("Logfile: {}", entry.getValue());
+				} else {
+					LOGGER.info("{}: {}", entry.getKey(), entry.getValue());
+				}
 			} else {
 				LOGGER.info("Logging to multiple files:");
 				Iterator<Entry<String, String>> logsIterator = lfps.entrySet().iterator();
 				Entry<String, String> entry;
 				while (logsIterator.hasNext()) {
 					entry = logsIterator.next();
-					LOGGER.info(String.format("%s: %s", entry.getKey(), entry.getValue()));
+					LOGGER.info("{}: {}", entry.getKey(), entry.getValue());
 				}
 			}
 		}
@@ -348,16 +341,31 @@ public class PMS {
 		String profileDirectoryPath = configuration.getProfileDirectory();
 
 		LOGGER.info("");
-		LOGGER.info("Profile directory: " + profileDirectoryPath);
-		LOGGER.info("Profile directory permissions: " + getPathPermissions(profileDirectoryPath));
-		LOGGER.info("Profile path: " + profilePath);
-		LOGGER.info("Profile permissions: " + getPathPermissions(profilePath));
-		LOGGER.info("Profile name: " + configuration.getProfileName());
+		LOGGER.info("Profile directory: {}", profileDirectoryPath);
+		try {
+			// Don't use the {} syntax here as the check needs to be performed on every log level
+			LOGGER.info("Profile directory permissions: " + FileUtil.getFilePermissions(profileDirectoryPath));
+		} catch (FileNotFoundException e) {
+			LOGGER.warn("Profile directory not found: {}", e.getMessage());
+		}
+		LOGGER.info("Profile configuration file: {}", profilePath);
+		try {
+			// Don't use the {} syntax here as the check needs to be performed on every log level
+			LOGGER.info("Profile configuration file permissions: " + FileUtil.getFilePermissions(profilePath));
+		} catch (FileNotFoundException e) {
+			LOGGER.warn("Profile configuration file not found: {}", e.getMessage());
+		}
+		LOGGER.info("Profile name: {}", configuration.getProfileName());
 		LOGGER.info("");
 		if (configuration.useWebInterface()) {
 			String webConfPath = configuration.getWebConfPath();
-			LOGGER.info("Web conf path: " + webConfPath);
-			LOGGER.info("Web conf permissions: " + getPathPermissions(webConfPath));
+			LOGGER.info("Web configuration file: {}", webConfPath);
+			try {
+				// Don't use the {} syntax here as the check needs to be performed on every log level
+				LOGGER.info("Web configuration file permissions: " + FileUtil.getFilePermissions(webConfPath));
+			} catch (FileNotFoundException e) {
+				LOGGER.warn("Web configuration file not found: {}", e.getMessage());
+			}
 			LOGGER.info("");
 		}
 
@@ -366,7 +374,9 @@ public class PMS {
 		 * usually done by the installer
 		 */
 		File dDir = new File(configuration.getDataDir());
-		dDir.mkdirs();
+		if (!dDir.exists() && !dDir.mkdirs()) {
+			LOGGER.error("Failed to create profile folder \"{}\"", configuration.getDataDir());
+		}
 
 		dbgPack = new DbgPacker();
 		tfm = new TempFileMgr();
@@ -386,16 +396,29 @@ public class PMS {
 	}
 
 	/**
-	 * Initialisation procedure for UMS.
+	 * Initialization procedure for UMS.
 	 *
-	 * @return true if the server has been initialized correctly. false if the server could
-	 *         not be set to listen on the UPnP port.
+	 * @return <code>true</code> if the server has been initialized correctly.
+	 *         <code>false</code> if initialization was aborted.
 	 * @throws Exception
 	 */
 	private boolean init() throws Exception {
+		// Show the language selection dialog before displayBanner();
+		if (configuration.getLanguageRawString() == null || !Languages.isValid(configuration.getLanguageRawString())) {
+			LanguageSelection languageDialog = new LanguageSelection(null, PMS.getLocale(), false);
+			if (languageDialog != null) {
+				languageDialog.show();
+				if (languageDialog.isAborted()) {
+					return false;
+				}
+			}
+		}
 
 		// call this as early as possible
 		displayBanner();
+
+		// initialize database
+		Tables.checkTables();
 
 		// Wizard
 		if (configuration.isRunWizard() && !isHeadless()) {
@@ -446,24 +469,30 @@ public class PMS {
 					options,
 					options[1]
 				);
-				if (networkType == JOptionPane.YES_OPTION) {
-					// Wired (Gigabit)
-					configuration.setMaximumBitrate("0");
-					configuration.setMPEG2MainSettings("Automatic (Wired)");
-					configuration.setx264ConstantRateFactor("Automatic (Wired)");
-					save();
-				} else if (networkType == JOptionPane.NO_OPTION) {
-					// Wired (100 Megabit)
-					configuration.setMaximumBitrate("90");
-					configuration.setMPEG2MainSettings("Automatic (Wired)");
-					configuration.setx264ConstantRateFactor("Automatic (Wired)");
-					save();
-				} else if (networkType == JOptionPane.CANCEL_OPTION) {
-					// Wireless
-					configuration.setMaximumBitrate("30");
-					configuration.setMPEG2MainSettings("Automatic (Wireless)");
-					configuration.setx264ConstantRateFactor("Automatic (Wireless)");
-					save();
+				switch (networkType) {
+					case JOptionPane.YES_OPTION:
+						// Wired (Gigabit)
+						configuration.setMaximumBitrate("0");
+						configuration.setMPEG2MainSettings("Automatic (Wired)");
+						configuration.setx264ConstantRateFactor("Automatic (Wired)");
+						save();
+						break;
+					case JOptionPane.NO_OPTION:
+						// Wired (100 Megabit)
+						configuration.setMaximumBitrate("90");
+						configuration.setMPEG2MainSettings("Automatic (Wired)");
+						configuration.setx264ConstantRateFactor("Automatic (Wired)");
+						save();
+						break;
+					case JOptionPane.CANCEL_OPTION:
+						// Wireless
+						configuration.setMaximumBitrate("30");
+						configuration.setMPEG2MainSettings("Automatic (Wireless)");
+						configuration.setx264ConstantRateFactor("Automatic (Wireless)");
+						save();
+						break;
+					default:
+						break;
 				}
 
 				// Ask if they want to hide advanced options
@@ -498,6 +527,12 @@ public class PMS {
 			}
 		}
 
+		// Splash
+		Splash splash = null;
+		if (!isHeadless()) {
+			splash = new Splash(configuration);
+		}
+
 		// The public VERSION field is deprecated.
 		// This is a temporary fix for backwards compatibility
 		VERSION = getVersion();
@@ -514,12 +549,16 @@ public class PMS {
 
 		registry = createSystemUtils();
 
-		if (System.getProperty(CONSOLE) == null) {
+		if (!isHeadless()) {
 			frame = new LooksFrame(autoUpdater, configuration);
 		} else {
-			LOGGER.info("GUI environment not available");
+			LOGGER.info("Graphics environment not available or headless mode is forced");
 			LOGGER.info("Switching to console mode");
 			frame = new DummyFrame();
+		}
+
+		if (splash != null) {
+			splash.dispose();
 		}
 
 		/*
@@ -559,6 +598,9 @@ public class PMS {
 		infoDb = new InfoDb();
 		codes = new CodeDb();
 		masterCode = null;
+
+		// init Credentials
+		credMgr = new CredMgr(configuration.getCredFile());
 
 		RendererConfiguration.loadRendererConfigurations(configuration);
 		// Now that renderer confs are all loaded, we can start searching for renderers
@@ -640,10 +682,10 @@ public class PMS {
 		}
 
 		// Disable jaudiotagger logging
-		LogManager.getLogManager().readConfiguration(new ByteArrayInputStream("org.jaudiotagger.level=OFF".getBytes()));
+		LogManager.getLogManager().readConfiguration(new ByteArrayInputStream("org.jaudiotagger.level=OFF".getBytes(StandardCharsets.US_ASCII)));
 
 		// Wrap System.err
-		System.setErr(new PrintStream(new SystemErrWrapper(), true));
+		System.setErr(new PrintStream(new SystemErrWrapper(), true, StandardCharsets.UTF_8.name()));
 
 		server = new HTTPServer(configuration.getServerPort());
 
@@ -675,9 +717,9 @@ public class PMS {
 		// Any plugin-defined players are now registered, create the gui view.
 		frame.addEngines();
 
-		// To make the cred stuff work cross plugins
-		// read cred file AFTER plugins are started
-		if (System.getProperty(CONSOLE) == null) {
+		// To make the credentials stuff work cross plugins read credentials
+		// file AFTER plugins are started
+		if (!isHeadless()) {
 			// but only if we got a GUI of course
 			((LooksFrame)frame).getPt().init();
 		}
@@ -687,7 +729,7 @@ public class PMS {
 		try {
 			binding = server.start();
 		} catch (BindException b) {
-			LOGGER.info("FATAL ERROR: Unable to bind on port: " + configuration.getServerPort() + ", because: " + b.getMessage());
+			LOGGER.error("FATAL ERROR: Unable to bind on port: " + configuration.getServerPort() + ", because: " + b.getMessage());
 			LOGGER.info("Maybe another process is running or the hostname is wrong.");
 		}
 
@@ -717,7 +759,6 @@ public class PMS {
 
 		// initialize the cache
 		if (configuration.getUseCache()) {
-			initializeDatabase(); // XXX: this must be done *before* new MediaLibrary -> new MediaLibraryFolder
 			mediaLibrary = new MediaLibrary();
 			LOGGER.info("A tiny cache admin interface is available at: http://" + server.getHost() + ":" + server.getPort() + "/console/home");
 		}
@@ -732,7 +773,7 @@ public class PMS {
 		ready = true;
 
 		// UPNPHelper.sendByeBye();
-		Runtime.getRuntime().addShutdownHook(new Thread("PMS Listeners Stopper") {
+		Runtime.getRuntime().addShutdownHook(new Thread("UMS Shutdown") {
 			@Override
 			public void run() {
 				try {
@@ -758,6 +799,18 @@ public class PMS {
 				} catch (InterruptedException e) {
 					LOGGER.debug("Caught exception", e);
 				}
+				LOGGER.info("Stopping " + PropertiesUtil.getProjectProperties().get("project.name") + " " + getVersion());
+				/**
+				 * Stopping logging gracefully (flushing logs)
+				 * No logging is available after this point
+				 */
+				ILoggerFactory iLoggerContext = LoggerFactory.getILoggerFactory();
+				if (iLoggerContext instanceof LoggerContext) {
+					((LoggerContext) iLoggerContext).stop();
+				} else {
+					LOGGER.error("Unable to shut down logging gracefully");
+				}
+
 			}
 		});
 
@@ -766,6 +819,13 @@ public class PMS {
 		LOGGER.trace("Waiting 250 milliseconds...");
 		Thread.sleep(250);
 		UPNPHelper.listen();
+
+		// Load the fully played overlay image, in case it's needed later
+		try {
+			thumbnailOverlayImage = ImageIO.read(FullyPlayed.class.getResourceAsStream("/resources/images/icon-fullyplayed.png"));
+		} catch (IOException ex) {
+			java.util.logging.Logger.getLogger(FullyPlayed.class.getName()).log(java.util.logging.Level.SEVERE, null, ex);
+		}
 
 		return true;
 	}
@@ -828,7 +888,6 @@ public class PMS {
 
 	public File[] getSharedFoldersArray(boolean monitored, ArrayList<String> tags, PmsConfiguration configuration) {
 		String folders;
-
 		if (monitored) {
 			folders = configuration.getFoldersMonitored();
 		} else {
@@ -1027,12 +1086,13 @@ public class PMS {
 
 		try {
 			if (instance.init()) {
-				LOGGER.info("The server is now available for renderers to find");
+				LOGGER.info("{} is now available for renderers to find", PMS.NAME);
 			} else {
-				LOGGER.error("A serious error occurred during PMS init");
+				LOGGER.info("{} initialization was aborted", PMS.NAME);
 			}
 		} catch (Exception e) {
-			LOGGER.error("A serious error occurred during PMS init", e);
+			LOGGER.error("A serious error occurred during {} initialization: {}", PMS.NAME, e.getMessage());
+			LOGGER.trace("", e);
 		}
 	}
 
@@ -1050,12 +1110,27 @@ public class PMS {
 
 	public static void main(String args[]) {
 		boolean displayProfileChooser = false;
+		boolean denyHeadless = false;
+		File profilePath = null;
+		CacheLogger.startCaching();
+		// Make sure that no other versions of JNA found on the system is used
+		System.setProperty("jna.nosys", "true");
+
+		// Set headless options if given as a system property when launching the JVM
+		if (System.getProperty(CONSOLE, "").equalsIgnoreCase(Boolean.toString(true))) {
+			forceHeadless();
+		}
+		if (System.getProperty(NOCONSOLE, "").equalsIgnoreCase(Boolean.toString(true))) {
+			denyHeadless = true;
+		}
 
 		if (args.length > 0) {
+			Pattern pattern = Pattern.compile(PROFILE);
 			for (String arg : args) {
 				switch (arg) {
+					case HEADLESS:
 					case CONSOLE:
-						System.setProperty(CONSOLE, Boolean.toString(true));
+						forceHeadless();
 						break;
 					case NATIVELOOK:
 						System.setProperty(NATIVELOOK, Boolean.toString(true));
@@ -1064,7 +1139,7 @@ public class PMS {
 						System.setProperty(SCROLLBARS, Boolean.toString(true));
 						break;
 					case NOCONSOLE:
-						System.setProperty(NOCONSOLE, Boolean.toString(true));
+						denyHeadless = true;
 						break;
 					case PROFILES:
 						displayProfileChooser = true;
@@ -1073,6 +1148,10 @@ public class PMS {
 						traceMode = 2;
 						break;
 					default:
+						Matcher matcher = pattern.matcher(arg);
+						if (matcher.find()) {
+							profilePath = new File(matcher.group(1));
+						}
 						break;
 				}
 			}
@@ -1080,57 +1159,85 @@ public class PMS {
 
 		try {
 			Toolkit.getDefaultToolkit();
-
-			if (isHeadless()) {
-				if (System.getProperty(NOCONSOLE) == null) {
-					System.setProperty(CONSOLE, Boolean.toString(true));
-				}
-			} 
-		} catch (Throwable t) {
+		} catch (AWTError t) {
 			LOGGER.error("Toolkit error: " + t.getClass().getName() + ": " + t.getMessage());
+			forceHeadless();
+		}
 
-			if (System.getProperty(NOCONSOLE) == null) {
-				System.setProperty(CONSOLE, Boolean.toString(true));
+		if (isHeadless() && denyHeadless) {
+			System.err.println(
+				"Either a graphics environment isn't available or headless " +
+			    "mode is forced, but \"noconsole\" is specified. " + PMS.NAME +
+			    " can't start, exiting."
+			);
+			System.exit(1);
+		} else if (!isHeadless()) {
+			LooksFrame.initializeLookAndFeel();
+		}
+
+		if (profilePath != null) {
+			if (!FileUtil.isValidFileName(profilePath.getName())) {
+				LOGGER.warn("Invalid file name in profile argument - using default profile");
+			} else if (!profilePath.exists()) {
+				LOGGER.warn("Specified profile ({}) doesn't exist - using default profile", profilePath.getAbsolutePath());
+			} else {
+				LOGGER.debug("Using specified profile: {}", profilePath.getAbsolutePath());
+				System.setProperty("ums.profile.path", profilePath.getAbsolutePath());
 			}
-		}
-
-		if (!isHeadless() && displayProfileChooser) {
+		} else if (!isHeadless() && displayProfileChooser) {
 			ProfileChooser.display();
-		}
-
-		try {
-			FileUtils.copyFile(new File("debug.log"), new File("debug.log.prev"));
-		} catch (Exception e) {
 		}
 
 		try {
 			setConfiguration(new PmsConfiguration());
 			assert getConfiguration() != null;
 
-			// Load the (optional) logback config file.
+			/* Rename previous log file to .prev
+			 * Log file location is unknown at this point, it's finally decided during loadFile() below
+			 * but the file is also truncated at the same time, so we'll have to try a qualified guess
+			 * for the file location.
+			 */
+
+			// Set root level from configuration here so that logging is available during renameOldLogFile();
+			LoggingConfig.setRootLevel(Level.toLevel(getConfiguration().getRootLogLevel()));
+			renameOldLogFile();
+
+			// Load the (optional) LogBack config file.
 			// This has to be called after 'new PmsConfiguration'
-			// as the logging starts immediately and some filters
-			// need the PmsConfiguration.
-			// XXX not sure this is (still) true: the only filter
-			// we use is ch.qos.logback.classic.filter.ThresholdFilter
-			LoggingConfigFileLoader.load();
+			LoggingConfig.loadFile();
 
 			// Check TRACE mode
-			ch.qos.logback.classic.Logger l=(ch.qos.logback.classic.Logger)LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME);
 			if (traceMode == 2) {
+				LoggingConfig.setRootLevel(Level.TRACE);
 				LOGGER.debug("Forcing debug level to TRACE");
-				l.setLevel(ch.qos.logback.classic.Level.TRACE);
 			} else {
 				// Remember whether logging level was TRACE/ALL at startup
-				traceMode = l.getLevel().toInt() <= ch.qos.logback.classic.Level.TRACE_INT ? 1 : 0;
+				traceMode = LoggingConfig.getRootLevel().toInt() <= Level.TRACE_INT ? 1 : 0;
 			}
+
+			// Configure syslog unless in forced trace mode
+			if (traceMode != 2 && configuration.getLoggingUseSyslog()) {
+				LoggingConfig.setSyslog();
+			}
+			// Configure log buffering
+			if (traceMode != 2 && configuration.getLoggingBuffered()) {
+				LoggingConfig.setBuffered(true);
+			} else if (traceMode == 2) {
+				// force unbuffered regardless of logback.xml if in forced trace mode
+				LOGGER.debug("Forcing unbuffered verbose logging");
+				LoggingConfig.setBuffered(false);
+				LoggingConfig.forceVerboseFileEncoder();
+			}
+
+			// Write buffered messages to the log now that logger is configured
+			CacheLogger.stopAndFlush();
 
 			LOGGER.debug(new Date().toString());
 
 			try {
 				getConfiguration().initCred();
 			} catch (IOException e) {
-				LOGGER.debug("Error initializing plugin credentials: " + e);
+				LOGGER.debug("Error initializing plugin credentials: {}", e);
 			}
 
 			if (getConfiguration().isRunSingleInstance()) {
@@ -1267,7 +1374,7 @@ public class PMS {
 		LOGGER.info("OS: " + System.getProperty("os.name") + " " + getOSBitness() + "-bit " + System.getProperty("os.version"));
 		LOGGER.info("Encoding: " + System.getProperty("file.encoding"));
 		LOGGER.info("Memory: " + memoryInMB + " " + Messages.getString("StatusTab.12"));
-		LOGGER.info("Language: " + getConfiguration().getLanguage());
+		LOGGER.info("Language: " + WordUtils.capitalize(PMS.getLocale().getDisplayName(Locale.ENGLISH)));
 		LOGGER.info("");
 
 		if (Platform.isMac()) {
@@ -1301,32 +1408,73 @@ public class PMS {
 	}
 
 	/**
-	 * Restart handling
+	 * Try to rename old logfile to <filename>.prev
 	 */
-	private static void killOld() {
-		if (configuration.isAdmin()) {
-			try {
-				killProc();
-			} catch (IOException e) {
-				LOGGER.debug("Error killing old process " + e);
-			}
+	private static void renameOldLogFile() {
+		String fullLogFileName = configuration.getDefaultLogFilePath();
+		String newLogFileName = fullLogFileName + ".prev";
 
-			try {
-				dumpPid();
-			} catch (IOException e) {
-				LOGGER.debug("Error dumping PID " + e);
+		try {
+			File logFile = new File(newLogFileName);
+			if (logFile.exists()) {
+				Files.delete(logFile);
 			}
-		} else {
-			LOGGER.info("UMS must be run as administrator in order to access the PID file");
+			logFile = new File(fullLogFileName);
+			if (logFile.exists()) {
+				File newFile = new File(newLogFileName);
+				if (!logFile.renameTo(newFile)) {
+					LOGGER.warn("Could not rename \"{}\" to \"{}\"",fullLogFileName,newLogFileName);
+				}
+			}
+		} catch (Exception e) {
+			LOGGER.warn("Could not rename \"{}\" to \"{}\": {}",fullLogFileName,newLogFileName,e);
 		}
 	}
 
-	private static boolean verifyPidName(String pid) throws IOException {
+	/**
+	 * Restart handling
+	 */
+	private static void killOld() {
+		// Note: failure here doesn't necessarily mean we need admin rights,
+		// only that we lack the required permission for these specific items.
+		try {
+			killProc();
+		} catch (AccessControlException e) {
+			LOGGER.error(
+				"Failed to check for already running instance: " + e.getMessage() +
+				(Platform.isWindows() ? "\nUMS might need to run as an administrator to access the PID file" : "")
+			);
+		} catch (FileNotFoundException e) {
+			LOGGER.debug("PID file not found, cannot check for running process");
+		} catch ( IOException e) {
+			LOGGER.error("Error killing old process: " + e);
+		}
+
+		try {
+			dumpPid();
+		} catch (FileNotFoundException e) {
+			LOGGER.error(
+				"Failed to write PID file: "+ e.getMessage() +
+				(Platform.isWindows() ? "\nUMS might need to run as an administrator to enforce single instance" : "")
+			);
+		} catch (IOException e) {
+			LOGGER.error("Error dumping PID " + e);
+		}
+	}
+
+	/*
+	 * This method is only called for Windows OS'es, so specialized Windows charset handling is allowed
+	 */
+	private static boolean verifyPidName(String pid) throws IOException, IllegalAccessException {
+		if (!Platform.isWindows()) {
+			throw new IllegalAccessException("verifyPidName can only be called from Windows!");
+		}
 		ProcessBuilder pb = new ProcessBuilder("tasklist", "/FI", "\"PID eq " + pid + "\"", "/V", "/NH", "/FO", "CSV");
 		pb.redirectErrorStream(true);
 		Process p = pb.start();
 		String line;
-		try (BufferedReader in = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+
+		try (BufferedReader in = new BufferedReader(new InputStreamReader(p.getInputStream(), "cp" + WinUtils.getOEMCP()))) {
 			try {
 				p.waitFor();
 			} catch (InterruptedException e) {
@@ -1358,10 +1506,15 @@ public class PMS {
 		return configuration.getDataFile("pms.pid");
 	}
 
-	private static void killProc() throws IOException {
+	private static void killProc() throws AccessControlException, IOException{
 		ProcessBuilder pb = null;
 		String pid;
-		try (BufferedReader in = new BufferedReader(new FileReader(pidFile()))) {
+		String pidFile = pidFile();
+		if (!FileUtil.getFilePermissions(pidFile).isReadable()) {
+			throw new AccessControlException("Cannot read " + pidFile);
+		}
+
+		try (BufferedReader in = new BufferedReader(new InputStreamReader(new FileInputStream(pidFile), StandardCharsets.US_ASCII))) {
 			pid = in.readLine();
 		}
 
@@ -1370,8 +1523,12 @@ public class PMS {
 		}
 
 		if (Platform.isWindows()) {
-			if (verifyPidName(pid)) {
-				pb = new ProcessBuilder("taskkill", "/F", "/PID", pid, "/T");
+			try {
+				if (verifyPidName(pid)) {
+					pb = new ProcessBuilder("taskkill", "/F", "/PID", pid, "/T");
+				}
+			} catch (IllegalAccessException e) {
+				// Impossible
 			}
 		} else if (Platform.isFreeBSD() || Platform.isLinux() || Platform.isOpenBSD() || Platform.isSolaris()) {
 			pb = new ProcessBuilder("kill", "-9", pid);
@@ -1384,8 +1541,8 @@ public class PMS {
 		try {
 			Process p = pb.start();
 			p.waitFor();
-		} catch (IOException | InterruptedException e) {
-			LOGGER.trace("Error killing process by PID " + e);
+		} catch (InterruptedException e) {
+			LOGGER.trace("Got interrupted while trying to kill process by PID " + e);
 		}
 	}
 
@@ -1397,9 +1554,9 @@ public class PMS {
 	private static void dumpPid() throws IOException {
 		try (FileOutputStream out = new FileOutputStream(pidFile())) {
 			long pid = getPID();
-			LOGGER.debug("PID: " + pid);
+			LOGGER.debug("Writing PID: " + pid);
 			String data = String.valueOf(pid) + "\r\n";
-			out.write(data.getBytes());
+			out.write(data.getBytes(StandardCharsets.US_ASCII));
 			out.flush();
 		}
 	}
@@ -1425,23 +1582,144 @@ public class PMS {
 		PlayerFactory.registerPlayer(player);
 	}
 
+	private static ReadWriteLock headlessLock = new ReentrantReadWriteLock();
 	private static Boolean headless = null;
-	
+
 	/**
-	 * Check if UMS is running in headless (console) mode, since some Linux
+	 * Checks if UMS is running in headless (console) mode, since some Linux
 	 * distros seem to not use java.awt.GraphicsEnvironment.isHeadless() properly
 	 */
 	public static boolean isHeadless() {
-		if (headless == null) {
-			try {
-				JDialog d = new JDialog();
-				d.dispose();
-				headless = new Boolean(false);
-			} catch (NoClassDefFoundError | HeadlessException | InternalError e) {
-				headless = new Boolean(true);				
+		headlessLock.readLock().lock();
+		try {
+			if (headless != null) {
+				return headless;
 			}
-		}		
-		return headless.booleanValue();
+		} finally {
+			headlessLock.readLock().unlock();
+		}
+
+		headlessLock.writeLock().lock();
+		try {
+			JDialog d = new JDialog();
+			d.dispose();
+			headless = false;
+			return headless;
+		} catch (NoClassDefFoundError | HeadlessException | InternalError e) {
+			headless = true;
+			return headless;
+		} finally {
+			headlessLock.writeLock().unlock();
+		}
+	}
+
+	/**
+	 * Forces UMS to run in headless (console) mode whether a graphics
+	 * environment is available or not.
+	 */
+	public static void forceHeadless() {
+		headlessLock.writeLock().lock();
+		try {
+			headless = true;
+		} finally {
+			headlessLock.writeLock().unlock();
+		}
+	}
+
+	private static Locale locale = null;
+	private static ReadWriteLock localeLock = new ReentrantReadWriteLock();
+
+	/**
+	 * Gets UMS' current {@link Locale} to be used in any {@link Locale}
+	 * sensitive operations. If <code>null</code> the default {@link Locale}
+	 * is returned.
+	 */
+
+	public static Locale getLocale() {
+		localeLock.readLock().lock();
+		try {
+			if (locale != null) {
+				return locale;
+			} else {
+				return Locale.getDefault();
+			}
+		} finally {
+			localeLock.readLock().unlock();
+		}
+	}
+
+	/**
+	 * Sets UMS' {@link Locale}.
+	 * @param aLocale the {@link Locale} to set
+	 */
+
+	public static void setLocale(Locale aLocale) {
+		localeLock.writeLock().lock();
+		try {
+			locale = (Locale) aLocale.clone();
+			Messages.setLocaleBundle(locale);
+		} finally {
+			localeLock.writeLock().unlock();
+		}
+	}
+
+	/**
+	 * Sets UMS' {@link Locale} with the same parameters as the
+	 * {@link Locale} class constructor. <code>null</code> values are
+	 * treated as empty strings.
+	 *
+	 * @param language An ISO 639 alpha-2 or alpha-3 language code, or a
+	 * language subtag up to 8 characters in length. See the
+	 * <code>Locale</code> class description about valid language values.
+	 * @param country An ISO 3166 alpha-2 country code or a UN M.49
+	 * numeric-3 area code. See the <code>Locale</code> class description
+	 * about valid country values.
+	 * @param variant Any arbitrary value used to indicate a variation of a
+	 * <code>Locale</code>. See the <code>Locale</code> class description
+	 * for the details.
+	 */
+	public static void setLocale(String language, String country, String variant) {
+		if (country == null) {
+			country = "";
+		}
+		if (variant == null) {
+			variant = "";
+		}
+		localeLock.writeLock().lock();
+		try {
+			locale = new Locale(language, country, variant);
+		} finally {
+			localeLock.writeLock().unlock();
+		}
+	}
+
+	/**
+	 * Sets UMS' {@link Locale} with the same parameters as the
+	 * {@link Locale} class constructor. <code>null</code> values are
+	 * treated as empty strings.
+	 *
+	 * @param language An ISO 639 alpha-2 or alpha-3 language code, or a
+	 * language subtag up to 8 characters in length. See the
+	 * <code>Locale</code> class description about valid language values.
+	 * @param country An ISO 3166 alpha-2 country code or a UN M.49
+	 * numeric-3 area code. See the <code>Locale</code> class description
+	 * about valid country values.
+	 */
+	public static void setLocale(String language, String country) {
+		setLocale(language, country, "");
+	}
+
+	/**
+	 * Sets UMS' {@link Locale} with the same parameters as the {@link Locale}
+	 * class constructor. <code>null</code> values are
+	 * treated as empty strings.
+	 *
+	 * @param language An ISO 639 alpha-2 or alpha-3 language code, or a
+	 * language subtag up to 8 characters in length. See the
+	 * <code>Locale</code> class description about valid language values.
+	 */
+	public static void setLocale(String language) {
+		setLocale(language, "", "");
 	}
 
 	private RemoteWeb web;
@@ -1500,10 +1778,6 @@ public class PMS {
 
 	public static boolean isReady() {
 		return get().ready;
-	}
-
-	public List<RendererConfiguration> getRenders() {
-		return foundRenderers;
 	}
 
 	public static GlobalIdRepo getGlobalRepo() {
@@ -1598,10 +1872,35 @@ public class PMS {
 		}
 	}
 
-	// 0=not started in trace mode, 1=started in trace mode, 2=forced to trace mode
 	private static int traceMode = 0;
 
+	/**
+	 * Returns current trace mode state
+	 *
+	 * @return
+	 *			0 = Not started in trace mode<br>
+	 *			1 = Started in trace mode<br>
+	 *			2 = Forced to trace mode
+	 */
 	public static int getTraceMode() {
 		return traceMode;
+	}
+
+	private CredMgr credMgr;
+
+	public static CredMgr.Cred getCred(String owner) {
+		return instance.credMgr.getCred(owner);
+	}
+
+	public static CredMgr.Cred getCred(String owner, String tag) {
+		return instance.credMgr.getCred(owner, tag);
+	}
+
+	public static String getCredTag(String owner, String username) {
+		return instance.credMgr.getTag(owner, username);
+	}
+
+	public static boolean verifyCred(String owner,String tag, String user, String pwd) {
+		return instance.credMgr.verify(owner, tag, user, pwd);
 	}
 }
